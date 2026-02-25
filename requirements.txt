@@ -1,0 +1,22 @@
+# Core LLM & Agent
+google-genai>=1.0.0
+openai>=1.30.0
+langgraph>=0.1.0
+langchain-core>=0.2.0
+
+# PDF Processing
+PyMuPDF>=1.24.0
+
+# Database & Data Generation
+faker>=25.0.0
+bcrypt>=4.1.0
+
+# Web Search
+duckduckgo-search>=6.0.0
+
+# CLI & UI
+rich>=13.7.0
+python-dotenv>=1.0.0
+
+# Utilities
+tenacity>=8.3.0
