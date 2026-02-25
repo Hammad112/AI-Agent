@@ -1,158 +1,177 @@
 """
 processing/pdf_processor.py
----------------------------
-Reads a PDF file and splits it into meaningful chunks.
-Import path changed from: pdf_processor → processing.pdf_processor
+----------------------------
+PDF and text file ingestion with intelligent chunking.
+Supports: .pdf (via PyMuPDF), .md, .txt files.
 """
 
-import re
 import os
+import re
 import sqlite3
-from pathlib import Path
-import fitz  # PyMuPDF
-
-DB_NAME = os.getenv("DB_NAME", "business_agent.db")
 
 
-def process_pdf(pdf_path: str) -> list[dict]:
-    path = Path(pdf_path)
-    if not path.exists():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
-    pages = _extract_pages(str(path))
-    chunks = _intelligent_chunk(pages)
-    _save_chunks(chunks)
-    return chunks
+def process_pdf(file_path: str) -> list[dict]:
+    """
+    Process a business description file (PDF, MD, or TXT).
+    Returns list of chunk dicts.
+    """
+    file_path = str(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".pdf":
+        pages = _extract_pages_pdf(file_path)
+    elif ext in (".md", ".txt", ".text"):
+        pages = _extract_pages_text(file_path)
+    else:
+        raise ValueError(f"Unsupported file type: {ext}. Use .pdf, .md, or .txt")
+
+    all_chunks = []
+    for page_num, page_text in enumerate(pages, 1):
+        chunks = _intelligent_chunk(page_text, page_num)
+        all_chunks.extend(chunks)
+
+    # Save to database
+    _save_chunks_to_db(all_chunks)
+    return all_chunks
 
 
-def load_chunks_from_db() -> list[dict]:
-    db_name = os.getenv("DB_NAME", "business_agent.db")
-    conn = sqlite3.connect(db_name, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        rows = conn.execute("SELECT * FROM pdf_chunks ORDER BY chunk_index").fetchall()
-        return [dict(r) for r in rows]
-    finally:
-        conn.close()
+def _extract_pages_pdf(pdf_path: str) -> list[str]:
+    """Extract text from a PDF using PyMuPDF."""
+    import fitz  # PyMuPDF
 
-
-def chunks_already_stored() -> bool:
-    db_name = os.getenv("DB_NAME", "business_agent.db")
-    conn = sqlite3.connect(db_name, check_same_thread=False)
-    try:
-        count = conn.execute("SELECT COUNT(*) FROM pdf_chunks").fetchone()[0]
-        return count > 0
-    finally:
-        conn.close()
-
-
-def _extract_pages(pdf_path: str) -> list[dict]:
     doc = fitz.open(pdf_path)
     pages = []
-    for page_num, page in enumerate(doc, start=1):
-        blocks = page.get_text("dict")["blocks"]
-        structured_blocks = []
-        for block in blocks:
-            if block.get("type") != 0:
-                continue
-            for line in block.get("lines", []):
-                line_text = ""
-                is_bold = False
-                font_size = 0.0
-                for span in line.get("spans", []):
-                    line_text += span.get("text", "")
-                    if "Bold" in span.get("font", "") or "bold" in span.get("font", ""):
-                        is_bold = True
-                    font_size = max(font_size, span.get("size", 0.0))
-
-                line_text = line_text.strip()
-                if not line_text:
-                    continue
-
-                is_header = is_bold or font_size >= 13.0
-                is_bullet = bool(re.match(r"^[\•\-\*\◆\►\▶\–\—\d]+[\.\)]\s+", line_text))
-
-                structured_blocks.append(
-                    {
-                        "text": line_text,
-                        "is_header": is_header,
-                        "is_bullet": is_bullet,
-                        "font_size": font_size,
-                    }
-                )
-        pages.append({"page_num": page_num, "blocks": structured_blocks})
+    for page in doc:
+        text = page.get_text("text")
+        if text.strip():
+            pages.append(text)
     doc.close()
     return pages
 
 
-def _intelligent_chunk(pages: list[dict]) -> list[dict]:
+def _extract_pages_text(file_path: str) -> list[str]:
+    """Extract text from markdown or plain text files, splitting on headings."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Split on top-level headings (##) to simulate "pages"
+    sections = re.split(r'\n(?=## )', content)
+    pages = [s.strip() for s in sections if s.strip()]
+    if not pages:
+        pages = [content]
+    return pages
+
+
+def _intelligent_chunk(text: str, page_num: int) -> list[dict]:
+    """
+    Split text into meaningful chunks based on structure:
+    - Headers
+    - Bullet/numbered lists
+    - Paragraphs
+    - Tables (keep together)
+    Does NOT use overlapping fixed-size windows.
+    """
     chunks = []
-    chunk_index = 0
-    current_section = "Introduction"
-    current_page = 1
-    buffer_lines: list[str] = []
-    in_bullet_block = False
+    current_section = ""
+    current_text_lines: list[str] = []
 
-    def flush(section: str, page: int) -> None:
-        nonlocal chunk_index, buffer_lines
-        text = " ".join(buffer_lines).strip()
-        if text:
-            chunks.append(
-                {
-                    "chunk_index": chunk_index,
-                    "page_num": page,
-                    "section_title": section,
-                    "text": text,
-                    "topic_tags": None,
-                }
-            )
-            chunk_index += 1
-        buffer_lines = []
+    lines = text.split("\n")
 
-    for page in pages:
-        current_page = page["page_num"]
-        for block in page["blocks"]:
-            text = block["text"]
+    for line in lines:
+        stripped = line.strip()
 
-            if block["is_header"]:
-                flush(current_section, current_page)
-                in_bullet_block = False
-                current_section = text
-                buffer_lines = [f"[SECTION: {text}]"]
+        # Detect headers (markdown or uppercase titles)
+        is_header = False
+        if stripped.startswith("#"):
+            is_header = True
+            header_text = stripped.lstrip("#").strip()
+        elif stripped.isupper() and len(stripped) > 3 and not stripped.startswith("|"):
+            is_header = True
+            header_text = stripped
 
-            elif block["is_bullet"]:
-                if not in_bullet_block:
-                    if buffer_lines:
-                        flush(current_section, current_page)
-                    in_bullet_block = True
-                buffer_lines.append(text)
+        if is_header:
+            # Save previous chunk
+            if current_text_lines:
+                chunk_text = "\n".join(current_text_lines).strip()
+                if chunk_text and len(chunk_text) > 20:
+                    chunks.append({
+                        "page_num": page_num,
+                        "section_title": current_section or "General",
+                        "text": chunk_text,
+                    })
+                current_text_lines = []
+            current_section = header_text
+            continue
 
-            else:
-                if in_bullet_block:
-                    flush(current_section, current_page)
-                    in_bullet_block = False
-                buffer_lines.append(text)
+        # Detect table rows (keep together with current section)
+        if stripped.startswith("|"):
+            current_text_lines.append(stripped)
+            continue
 
-                if len(text) < 80 and buffer_lines:
-                    flush(current_section, current_page)
+        # Detect bullet points
+        if re.match(r'^[-*+] ', stripped) or re.match(r'^\d+\.\s', stripped):
+            current_text_lines.append(stripped)
+            continue
 
-    flush(current_section, current_page)
+        # Empty line = potential paragraph break
+        if not stripped:
+            joined = "\n".join(current_text_lines).strip()
+            if joined and len(joined) > 20:
+                # If chunk is getting large, save it
+                if len(joined) > 800:
+                    chunks.append({
+                        "page_num": page_num,
+                        "section_title": current_section or "General",
+                        "text": joined,
+                    })
+                    current_text_lines = []
+            continue
+
+        current_text_lines.append(stripped)
+
+        # Safety: if accumulated text is very large, flush
+        joined = "\n".join(current_text_lines)
+        if len(joined) > 1200:
+            chunks.append({
+                "page_num": page_num,
+                "section_title": current_section or "General",
+                "text": joined.strip(),
+            })
+            current_text_lines = []
+
+    # Final chunk
+    if current_text_lines:
+        chunk_text = "\n".join(current_text_lines).strip()
+        if chunk_text and len(chunk_text) > 10:
+            chunks.append({
+                "page_num": page_num,
+                "section_title": current_section or "General",
+                "text": chunk_text,
+            })
+
+    # Number the chunks
+    for i, chunk in enumerate(chunks):
+        chunk["chunk_index"] = i
+
     return chunks
 
 
-def _save_chunks(chunks: list[dict]) -> None:
+def _save_chunks_to_db(chunks: list[dict]) -> None:
+    """Save processed chunks to the database."""
     db_name = os.getenv("DB_NAME", "business_agent.db")
-    conn = sqlite3.connect(db_name, check_same_thread=False)
+    conn = sqlite3.connect(db_name)
     try:
+        # Clear old chunks
         conn.execute("DELETE FROM pdf_chunks")
+
         for chunk in chunks:
             conn.execute(
-                "INSERT INTO pdf_chunks (chunk_index, page_num, section_title, text, topic_tags) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pdf_chunks (chunk_index, page_num, section_title, text) VALUES (?, ?, ?, ?)",
                 (
-                    chunk["chunk_index"],
-                    chunk["page_num"],
-                    chunk["section_title"],
-                    chunk["text"],
-                    chunk.get("topic_tags"),
+                    chunk.get("chunk_index", 0),
+                    chunk.get("page_num", 0),
+                    chunk.get("section_title", ""),
+                    chunk.get("text", ""),
                 ),
             )
         conn.commit()
@@ -160,7 +179,15 @@ def _save_chunks(chunks: list[dict]) -> None:
         conn.close()
 
 
-def get_pdf_summary(chunks: list[dict], max_chars: int = 3000) -> str:
-    texts = [c["text"] for c in chunks[:30]]
-    combined = " ".join(texts)
-    return combined[:max_chars]
+def load_chunks() -> list[dict]:
+    """Load all chunks from the database."""
+    db_name = os.getenv("DB_NAME", "business_agent.db")
+    conn = sqlite3.connect(db_name)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT id, chunk_index, page_num, section_title, text FROM pdf_chunks ORDER BY chunk_index"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()

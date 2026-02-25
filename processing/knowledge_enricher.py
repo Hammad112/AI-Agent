@@ -1,8 +1,10 @@
 """
 processing/knowledge_enricher.py
 ---------------------------------
-Uses LLM to generate supplementary knowledge not in the PDF.
-Import path changed from: knowledge_enricher → processing.knowledge_enricher
+Uses LLM to:
+  1) detect_business_type() from PDF text
+  2) enrich_knowledge() — generate supplementary knowledge not in the PDF
+     (called "skills" in the spec): FAQs, product comparisons, tips, etc.
 """
 
 import os
@@ -27,7 +29,11 @@ def enrichment_already_done() -> bool:
         conn.close()
 
 
-def detect_business_type(pdf_summary: str) -> tuple[str, str]:
+def detect_business_type(pdf_summary: str) -> dict:
+    """
+    Detect business name and type from PDF content.
+    Returns dict: {"business_name": "...", "business_type": "..."}
+    """
     prompt = f"""
 Analyse this business document excerpt and identify the business:
 
@@ -47,35 +53,53 @@ No markdown, just JSON.
     raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         data = json.loads(raw)
-        return data.get("business_name", "The Business"), data.get("business_type", "general business")
+        return {
+            "business_name": data.get("business_name", "The Business"),
+            "business_type": data.get("business_type", "general business"),
+        }
     except json.JSONDecodeError:
-        return "The Business", "general business"
+        return {"business_name": "The Business", "business_type": "general business"}
 
 
-def enrich_knowledge(
-    chunks: list[dict],
-    business_name: str,
-    business_type: str,
-) -> list[dict]:
-    chunk_texts = "\n\n".join(c["text"] for c in chunks[:40])
+def enrich_knowledge(pdf_text: str, business_type: str, business_name: str = "") -> list[dict]:
+    """
+    Generate supplementary "skills" — knowledge topics not in the PDF.
+    Uses LLM to identify gaps and then write detailed articles for each.
+    
+    Args:
+        pdf_text: Sample text from the ingested PDF for context
+        business_type: e.g. "restaurant", "dental clinic"
+        business_name: Optional name of the business
+    """
+    if enrichment_already_done():
+        return load_enriched_from_db()
+
+    if not business_name:
+        business_name = "the business"
+
     topics_prompt = f"""
 You are a knowledge base enricher for "{business_name}" ({business_type}).
 
 Here is the existing knowledge from their PDF:
 ---
-{chunk_texts[:3000]}
+{pdf_text[:3000]}
 ---
 
-List 8 important topics that would be valuable to add to this knowledge base
-but are NOT fully covered in the existing content. Focus on:
-- FAQs customers commonly ask
-- Detailed product/service specs or comparisons
-- Pricing tier breakdowns
-- Loyalty and discount explanations
-- Booking and cancellation policies
+List 8-10 important topics that would be valuable to add to this knowledge base
+but are NOT fully covered in the existing content. These are called "skills" —
+supplementary knowledge that helps the AI agent handle customer requests better.
+
+Focus on:
+- FAQs customers commonly ask for this type of business
+- Detailed product/service specifications or comparisons
+- Cross-selling and upselling strategies
+- Pricing tier breakdowns and value explanations
+- Booking and cancellation policies and best practices
 - Common tips or best practices for this business type
 - Seasonal offers or promotions structure
-- Staff qualifications or certifications
+- Staff qualifications and expertise areas
+- Customer care and complaint handling procedures
+- Industry-standard practices and quality markers
 
 Return ONLY a JSON array of topic names:
 ["Topic 1", "Topic 2", ...]
@@ -103,28 +127,33 @@ No markdown, just JSON.
     for topic in topics:
         content = _enrich_topic(topic, business_name, business_type)
         if content:
-            enriched.append(
-                {
-                    "topic": topic,
-                    "content": content,
-                    "source": "llm_enrichment",
-                    "topic_tags": topic.lower().replace(" ", ","),
-                }
-            )
+            enriched.append({
+                "topic": topic,
+                "content": content,
+                "source": "llm_enrichment",
+                "topic_tags": topic.lower().replace(" ", ","),
+            })
 
     _save_enriched(enriched)
     return enriched
 
 
 def _enrich_topic(topic: str, business_name: str, business_type: str) -> str:
+    """Generate a detailed knowledge article on the given topic."""
     prompt = f"""
 You are a knowledgeable assistant for "{business_name}" ({business_type}).
 
 Write a detailed, helpful, and realistic knowledge base article about:
 "{topic}"
 
-This content will be shown to customers as part of a customer service response system.
+This content will be used by an AI customer service agent to answer customer questions.
 Make it specific to {business_type} businesses. Be factual, practical, and thorough.
+Include:
+- Relevant tips and best practices
+- Common questions and their answers
+- Industry-standard information
+- Practical examples where helpful
+
 Use clear paragraphs. Write in the third person. Approximately 200-350 words.
 """
     try:

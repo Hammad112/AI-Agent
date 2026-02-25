@@ -1,8 +1,11 @@
 """
 agent/agent.py
 --------------
-LangGraph state machine agent with a custom BATCHED LLM router.
-Import paths changed from flat modules to package paths.
+LangGraph state machine agent with:
+  - Custom BATCHED LLM router (not LangChain's built-in)
+  - Critic node that validates response against PDF rules
+  - Intent detection for multi-intent messages
+  - Conversation state tracking for multi-turn flows
 """
 
 import os
@@ -14,7 +17,10 @@ import operator
 from langgraph.graph import StateGraph, END
 
 from core.llm_client import llm_call
-from core.database import get_global_stats, get_business_meta
+from core.database import (
+    get_global_stats, get_business_meta,
+    save_conversation_state, load_conversation_state,
+)
 from core.logger import (
     log_message,
     log_tool_call,
@@ -44,13 +50,17 @@ class AgentState(TypedDict):
     retrieved_chunks: list[dict]
     retrieved_chunk_ids: list[int]
     query_topics: list[str]
+    detected_intents: list[str]
     customer_context: dict
     global_stats: dict
     tool_results: dict
     activated_tools: list[str]
     response: str
+    critic_passed: bool
+    critic_feedback: str
     business_name: str
     business_type: str
+    conversation_state: dict  # persistent multi-turn state
 
 
 # ─────────────────────────────────────────────
@@ -58,9 +68,81 @@ class AgentState(TypedDict):
 # ─────────────────────────────────────────────
 
 def node_receive_input(state: AgentState) -> AgentState:
-    history = get_conversation_history(state["conversation_id"], limit=10)
+    history = get_conversation_history(state["conversation_id"], limit=15)
     log_message(state["conversation_id"], "user", state["query"])
-    return {**state, "history": history}
+
+    # Load persistent conversation state
+    conv_state = load_conversation_state(state["conversation_id"]) or {
+        "active_flow": None,  # e.g. "ordering", "booking", "info"
+        "pending_slots": {},  # fields still needed
+        "cart_active": False,
+        "last_tool": None,
+    }
+
+    return {**state, "history": history, "conversation_state": conv_state}
+
+
+# ─────────────────────────────────────────────
+# Node: detect_intents
+# ─────────────────────────────────────────────
+
+def node_detect_intents(state: AgentState) -> AgentState:
+    """Detect multiple intents in a single message (e.g. question + booking)."""
+    query = state["query"]
+    history_snippet = "\n".join(
+        f"{m['role'].upper()}: {m['content']}" for m in state["history"][-4:]
+    )
+    conv_state = state.get("conversation_state", {})
+
+    prompt = f"""Analyse this customer message and detect ALL intents present.
+A message can have multiple intents (e.g. asking a price question AND requesting a booking).
+
+Conversation history:
+{history_snippet or 'None'}
+
+Active flow: {conv_state.get('active_flow', 'none')}
+Pending information needed: {json.dumps(conv_state.get('pending_slots', {}))}
+
+Customer message: "{query}"
+
+Possible intents:
+- order_item: wants to add/order a product or service
+- remove_item: wants to remove or change an item in their order
+- view_cart: wants to see current order
+- confirm_order: wants to confirm/finalize order
+- book_appointment: wants to schedule an appointment
+- reschedule: wants to change appointment time
+- cancel_booking: wants to cancel
+- check_availability: asks about available times
+- ask_pricing: asks about prices
+- ask_hours: asks about business hours
+- ask_info: general information question
+- provide_address: giving a delivery address
+- set_delivery: specifying pickup or delivery
+- complaint: has an issue or dispute
+- greeting: just saying hello
+- provide_missing_info: answering a previous question from the agent
+- ask_recommendations: wants suggestions
+- loyalty_question: asks about points/rewards
+- goodbye: ending conversation
+
+Return ONLY a JSON array of detected intents: ["order_item", "ask_pricing"]
+No markdown, just JSON."""
+
+    raw = llm_call(prompt, temperature=0.1, max_tokens=200)
+    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        start = raw.find("[")
+        end = raw.rfind("]") + 1
+        if start != -1 and end > start:
+            intents = json.loads(raw[start:end])
+        else:
+            intents = ["ask_info"]
+    except (json.JSONDecodeError, TypeError):
+        intents = ["ask_info"]
+
+    log_agent_event(state["conversation_id"], "intent_detection", {"intents": intents})
+    return {**state, "detected_intents": intents}
 
 
 # ─────────────────────────────────────────────
@@ -102,10 +184,12 @@ def node_route_tools(state: AgentState) -> AgentState:
     """
     query = state["query"]
     topics = state["query_topics"]
+    intents = state.get("detected_intents", [])
     history_snippet = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in state["history"][-3:]
+        f"{m['role'].upper()}: {m['content']}" for m in state["history"][-4:]
     )
     customer_tier = state.get("customer_context", {}).get("loyalty_tier", "bronze")
+    conv_state = state.get("conversation_state", {})
 
     tools_list = "\n".join(
         f"{i+1}. {name}: {desc}"
@@ -116,8 +200,10 @@ def node_route_tools(state: AgentState) -> AgentState:
 You must decide which tools to activate for the customer's query.
 
 Customer query: "{query}"
+Detected intents: {intents}
 Query topics: {topics}
 Customer loyalty tier: {customer_tier}
+Active conversation flow: {conv_state.get('active_flow', 'none')}
 Recent conversation:
 {history_snippet or 'None'}
 
@@ -125,17 +211,19 @@ Available tools (name: purpose):
 {tools_list}
 
 Instructions:
-- Review each tool carefully.
+- Review each tool carefully against the detected intents.
 - Select ONLY the tools that are directly needed to handle this specific query.
+- For multi-intent messages, activate tools for ALL intents.
 - Do NOT activate tools unless the query clearly requires their action.
+- Consider the conversation flow: if the customer is continuing a booking or order, activate relevant tools.
 - Return ONLY a JSON array of tool names to activate, e.g.: ["tool_a", "tool_b"]
-- If no tools are needed (e.g. general question), return: []
+- If no tools are needed (e.g. simple greeting), return: []
 
 JSON array of tools to activate:"""
 
     activated = []
     try:
-        raw = llm_call(prompt, temperature=0.0, max_tokens=200).strip()
+        raw = llm_call(prompt, temperature=0.0, max_tokens=300).strip()
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         start = raw.find("[")
         end = raw.rfind("]") + 1
@@ -146,12 +234,13 @@ JSON array of tools to activate:"""
         log_agent_event(state["conversation_id"], "router_error", {"error": str(e)})
         activated = []
 
+    # Log all tool decisions
     for tool_name in TOOLS:
         activated_flag = tool_name in activated
         log_tool_call(
             state["conversation_id"],
             tool_name,
-            {"query": query, "topics": topics},
+            {"query": query, "topics": topics, "intents": intents},
             {"activated": activated_flag},
             activated=activated_flag,
         )
@@ -184,7 +273,31 @@ def node_execute_tools(state: AgentState) -> AgentState:
             tool_results[tool_name] = {"success": False, "error": str(e)}
             log_agent_event(state["conversation_id"], "tool_error", {"tool": tool_name, "error": str(e)})
 
-    return {**state, "tool_results": tool_results}
+    # Update conversation state based on tool results
+    conv_state = dict(state.get("conversation_state", {}))
+    for name, result in tool_results.items():
+        if name in ("add_to_cart", "remove_from_cart"):
+            conv_state["cart_active"] = bool(result.get("cart_items"))
+            conv_state["active_flow"] = "ordering"
+        elif name == "confirm_order":
+            conv_state["cart_active"] = False
+            conv_state["active_flow"] = None
+        elif name == "book_appointment":
+            if result.get("needs_info"):
+                conv_state["active_flow"] = "booking"
+                conv_state["pending_slots"] = {f: True for f in result.get("missing_fields", [])}
+            else:
+                conv_state["active_flow"] = None
+                conv_state["pending_slots"] = {}
+        elif name == "validate_address":
+            if result.get("success"):
+                conv_state["pending_slots"].pop("address", None)
+        conv_state["last_tool"] = name
+
+    # Persist conversation state
+    save_conversation_state(state["conversation_id"], conv_state)
+
+    return {**state, "tool_results": tool_results, "conversation_state": conv_state}
 
 
 # ─────────────────────────────────────────────
@@ -201,6 +314,8 @@ def node_build_response(state: AgentState) -> AgentState:
         conversation_history=state["history"],
         business_name=state["business_name"],
         business_type=state["business_type"],
+        detected_intents=state.get("detected_intents", []),
+        conversation_state=state.get("conversation_state", {}),
     )
 
     response = llm_call(composite_prompt, temperature=0.5, max_tokens=800)
@@ -211,10 +326,103 @@ def node_build_response(state: AgentState) -> AgentState:
         {
             "retrieved_chunks": len(state["retrieved_chunks"]),
             "activated_tools": state["activated_tools"],
+            "detected_intents": state.get("detected_intents", []),
             "response_length": len(response),
         },
     )
     return {**state, "response": response}
+
+
+# ─────────────────────────────────────────────
+# Node: critic  (validates response against PDF rules)
+# ─────────────────────────────────────────────
+
+def node_critic(state: AgentState) -> AgentState:
+    """
+    The Critic validates: 'Did I follow the extracted PDF rules?'
+    If not confidence is low, it returns feedback for improvement.
+    """
+    response = state["response"]
+    query = state["query"]
+
+    # Get relevant PDF rules from retrieved chunks
+    pdf_rules = "\n".join(
+        f"- {c.get('text', '')[:200]}" for c in state["retrieved_chunks"][:5]
+    )
+    tool_results_summary = ", ".join(state["activated_tools"]) if state["activated_tools"] else "none"
+
+    prompt = f"""You are a quality control critic for a customer service AI agent.
+Review the agent's response and check:
+
+1. Does it follow the business rules from the PDF knowledge base?
+2. Is it factually consistent with the tool results?
+3. Does it address ALL the customer's intents?
+4. Is it professional, empathetic, and complete?
+5. Does it ask for missing information when needed?
+
+Customer query: "{query}"
+Detected intents: {state.get('detected_intents', [])}
+Tools activated: {tool_results_summary}
+
+Business rules (from PDF):
+{pdf_rules or 'No specific rules retrieved.'}
+
+Agent response to review:
+"{response}"
+
+Return ONLY JSON:
+{{
+  "passed": true,
+  "score": 8,
+  "issues": [],
+  "suggested_fix": ""
+}}
+
+If score < 6, set passed=false and describe the issue.
+No markdown, just JSON."""
+
+    try:
+        raw = llm_call(prompt, temperature=0.1, max_tokens=300)
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        critic_result = json.loads(raw)
+    except (json.JSONDecodeError, Exception):
+        critic_result = {"passed": True, "score": 7, "issues": [], "suggested_fix": ""}
+
+    passed = critic_result.get("passed", True)
+    log_agent_event(state["conversation_id"], "critic_review", critic_result)
+
+    if not passed and critic_result.get("suggested_fix"):
+        # Regenerate response with critic feedback
+        fix_prompt = f"""The previous response had issues. Please fix it.
+
+Original response: "{response}"
+Issues: {critic_result.get('issues', [])}
+Suggested fix: {critic_result.get('suggested_fix', '')}
+
+Customer query: "{query}"
+Write a corrected response that addresses the issues. Be concise."""
+
+        try:
+            fixed_response = llm_call(fix_prompt, temperature=0.4, max_tokens=600)
+            log_message(state["conversation_id"], "assistant_revised", fixed_response)
+            log_agent_event(state["conversation_id"], "critic_revision", {
+                "original_score": critic_result.get("score"),
+                "issues": critic_result.get("issues"),
+            })
+            return {
+                **state,
+                "response": fixed_response,
+                "critic_passed": True,
+                "critic_feedback": f"Revised (was score {critic_result.get('score', '?')})",
+            }
+        except Exception:
+            pass
+
+    return {
+        **state,
+        "critic_passed": passed,
+        "critic_feedback": json.dumps(critic_result.get("issues", [])),
+    }
 
 
 # ─────────────────────────────────────────────
@@ -225,17 +433,21 @@ def build_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     graph.add_node("receive_input", node_receive_input)
+    graph.add_node("detect_intents", node_detect_intents)
     graph.add_node("rag_retrieval", node_rag_retrieval)
     graph.add_node("route_tools", node_route_tools)
     graph.add_node("execute_tools", node_execute_tools)
     graph.add_node("build_response", node_build_response)
+    graph.add_node("critic", node_critic)
 
     graph.set_entry_point("receive_input")
-    graph.add_edge("receive_input", "rag_retrieval")
+    graph.add_edge("receive_input", "detect_intents")
+    graph.add_edge("detect_intents", "rag_retrieval")
     graph.add_edge("rag_retrieval", "route_tools")
     graph.add_edge("route_tools", "execute_tools")
     graph.add_edge("execute_tools", "build_response")
-    graph.add_edge("build_response", END)
+    graph.add_edge("build_response", "critic")
+    graph.add_edge("critic", END)
 
     return graph.compile()
 
@@ -272,13 +484,17 @@ def run_agent_turn(
         "retrieved_chunks": [],
         "retrieved_chunk_ids": [],
         "query_topics": [],
+        "detected_intents": [],
         "customer_context": {},
         "global_stats": {},
         "tool_results": {},
         "activated_tools": [],
         "response": "",
+        "critic_passed": True,
+        "critic_feedback": "",
         "business_name": business_name,
         "business_type": business_type,
+        "conversation_state": {},
     }
     final_state = agent.invoke(initial_state)
     return final_state["response"]

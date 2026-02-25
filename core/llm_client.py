@@ -1,106 +1,115 @@
 """
 core/llm_client.py
 ------------------
-Unified LLM caller with OpenAI as primary and Gemini as fallback.
-Uses the new google-genai SDK (google.genai) for Gemini fallback.
-
-OpenAI is called first (paid tier, no rate-limit issues).
-If OpenAI is unavailable, falls back to Gemini with exponential
-backoff to handle the free-tier rate limits (15 req/min).
+Unified LLM caller: OpenAI primary → Gemini fallback.
+Reads model names from environment. Retry on rate-limit.
 """
 
 import os
 import time
+import json
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-# Gemini fallback models to try in order
-GEMINI_MODELS = [
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash-001",
-]
-
-
-def llm_call(prompt: str, temperature: float = 0.3, max_tokens: int = 4096) -> str:
-    openai_key = os.getenv("OPENAI_API_KEY", "")
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-
-    # --- Primary: OpenAI ---
-    if openai_key and openai_key not in ("your_openai_api_key_here", ""):
-        try:
-            return _openai_call(prompt, temperature, max_tokens)
-        except Exception as e:
-            print(f"[LLM] OpenAI error: {type(e).__name__}: {str(e)[:120]}")
-            print("[LLM] OpenAI unavailable, falling back to Gemini…")
-
-    # --- Fallback: Gemini ---
-    if gemini_key and gemini_key not in ("your_gemini_api_key_here", ""):
-        for cycle in range(3):
-            result, exhausted = _try_gemini_cycle(prompt, temperature, max_tokens)
-            if result is not None:
-                return result
-            if not exhausted:
-                break
-            wait_secs = 60
-            print(f"[LLM] Gemini quota exhausted. Waiting {wait_secs}s for rate limit reset… (attempt {cycle+1}/3)")
-            time.sleep(wait_secs)
-        print("[LLM] Gemini also unavailable after retries.")
-
-    raise RuntimeError(
-        "No valid LLM API key found. "
-        "Open .env and set OPENAI_API_KEY or GEMINI_API_KEY."
-    )
-
-
-def _openai_call(prompt: str, temperature: float, max_tokens: int) -> str:
+# Try to import LLM clients
+try:
     from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+
+# Read model names from environment (with sensible defaults)
+def _openai_model() -> str:
+    return os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+def _gemini_models() -> list[str]:
+    env_model = os.getenv("GEMINI_MODEL")
+    if env_model:
+        return [env_model]
+    return ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-001"]
+
+
+# ── OpenAI call ────────────────────────────────
+
+def _openai_call(prompt: str, temperature: float = 0.3, max_tokens: int = 600) -> str:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key or not OPENAI_AVAILABLE:
+        raise RuntimeError("OpenAI not available")
+
+    client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
-        model=model_name,
+        model=_openai_model(),
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content.strip()
 
 
-def _try_gemini_cycle(
-    prompt: str, temperature: float, max_tokens: int
-) -> tuple[str | None, bool]:
-    from google import genai
-    from google.genai import types
+# ── Gemini call (cycles through model list) ────
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    any_rate_limited = False
+def _try_gemini_cycle(prompt: str, temperature: float = 0.3, max_tokens: int = 600) -> str:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key or not GEMINI_AVAILABLE:
+        raise RuntimeError("Gemini not available")
 
-    for model in GEMINI_MODELS:
-        wait = 5
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_tokens,
-                    ),
-                )
-                return response.text, False
-            except Exception as e:
-                err = str(e)
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    any_rate_limited = True
-                    if attempt < 2:
-                        print(f"[LLM] {model} rate-limited, waiting {wait}s…")
-                        time.sleep(wait)
-                        wait = min(wait * 2, 30)
-                    else:
-                        print(f"[LLM] {model} still rate-limited, trying next model…")
-                elif "404" in err or "NOT_FOUND" in err:
-                    break
-                else:
-                    print(f"[LLM] {model} error: {type(e).__name__}: {err[:80]}")
-                    return None, False
+    client = genai.Client(api_key=api_key)
+    models = _gemini_models()
+    last_error = None
 
-    return None, any_rate_limited
+    for model_name in models:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                },
+            )
+            if response and response.text:
+                return response.text.strip()
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if "429" in err_str or "quota" in err_str or "rate" in err_str:
+                time.sleep(5)
+            continue
+
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+
+
+# ── Public unified caller ────────────────────
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, min=2, max=30),
+    retry=retry_if_exception_type(Exception),
+    reraise=True,
+)
+def llm_call(prompt: str, temperature: float = 0.3, max_tokens: int = 600) -> str:
+    """
+    Call an LLM. Tries OpenAI first, falls back to Gemini.
+    Retries up to 3 times with exponential backoff.
+    """
+    # Try OpenAI first
+    if os.getenv("OPENAI_API_KEY") and OPENAI_AVAILABLE:
+        try:
+            return _openai_call(prompt, temperature, max_tokens)
+        except Exception:
+            pass
+
+    # Fall back to Gemini
+    if os.getenv("GEMINI_API_KEY") and GEMINI_AVAILABLE:
+        return _try_gemini_cycle(prompt, temperature, max_tokens)
+
+    raise RuntimeError(
+        "No valid LLM API key found. "
+        "Set OPENAI_API_KEY or GEMINI_API_KEY in your .env file."
+    )
