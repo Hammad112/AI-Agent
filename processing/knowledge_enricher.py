@@ -10,6 +10,7 @@ Uses LLM to:
 import os
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from core.llm_client import llm_call
 
 
@@ -124,15 +125,24 @@ No markdown, just JSON.
         ]
 
     enriched = []
-    for topic in topics:
-        content = _enrich_topic(topic, business_name, business_type)
-        if content:
-            enriched.append({
-                "topic": topic,
-                "content": content,
-                "source": "llm_enrichment",
-                "topic_tags": topic.lower().replace(" ", ","),
-            })
+    
+    # Use parallel execution for faster enrichment
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_enrich_topic, topic, business_name, business_type): topic for topic in topics}
+        
+        for future in futures:
+            topic = futures[future]
+            try:
+                content = future.result()
+                if content:
+                    enriched.append({
+                        "topic": topic,
+                        "content": content,
+                        "source": "llm_enrichment",
+                        "topic_tags": topic.lower().replace(" ", ","),
+                    })
+            except Exception as e:
+                print(f"Error enriching topic {topic}: {e}")
 
     _save_enriched(enriched)
     return enriched

@@ -10,7 +10,7 @@ import os
 import json
 import random
 import bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from faker import Faker
 from core.llm_client import llm_call
 
@@ -232,7 +232,7 @@ def save_conversation_state(conversation_id: str, state: dict) -> None:
     try:
         conn.execute(
             "INSERT OR REPLACE INTO conversation_state (conversation_id, state_json, updated_at) VALUES (?, ?, ?)",
-            (conversation_id, json.dumps(state, default=str), datetime.utcnow().isoformat()),
+            (conversation_id, json.dumps(state, default=str), datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
     finally:

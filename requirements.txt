@@ -30,3 +30,7 @@ tenacity
 # FastAPI server
 fastapi
 uvicorn[standard]
+# Documentation
+python-docx
+# Geolocation
+geopy

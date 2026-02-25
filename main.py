@@ -118,36 +118,19 @@ def _prompt_for_pdf() -> Path:
         )
     )
 
-    # Check for sample PDFs
-    sample_dir = Path("sample_pdfs")
-    if sample_dir.exists():
-        samples = list(sample_dir.glob("*.*"))
-        if samples:
-            console.print("\n[bold]Available sample files:[/]")
-            for i, sample in enumerate(samples, 1):
-                console.print(f"  [cyan]{i}[/]. {sample.name}")
-            console.print()
-
     while True:
         choice = Prompt.ask(
-            "Enter the path to your business file (or number for sample)",
-            default="1",
+            "Enter the path to your business description file (e.g., salon.pdf or info.md)"
         )
 
-        # Check if it's a number (select sample)
-        try:
-            idx = int(choice) - 1
-            samples = list(sample_dir.glob("*.*")) if sample_dir.exists() else []
-            if 0 <= idx < len(samples):
-                return samples[idx]
-        except (ValueError, IndexError):
-            pass
-
-        # Regular path
-        path = Path(choice)
-        if path.exists():
+        path = Path(choice.strip())
+        if path.exists() and path.is_file():
             return path
-        console.print(f"[red]File not found:[/] {choice}. Try again.")
+        
+        if not path.exists():
+            console.print(f"[red]Error:[/] File not found at [bold]{path}[/]. Please check the path and try again.")
+        else:
+            console.print(f"[red]Error:[/] [bold]{path}[/] is not a valid file. Please provide a path to a .pdf, .md, or .txt file.")
 
 
 # ── Conversation loop ─────────────────────────

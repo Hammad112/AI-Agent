@@ -17,6 +17,8 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
+from core.logger import log_agent_event, log_llm_call
+
 try:
     from google import genai
     GEMINI_AVAILABLE = True
@@ -93,23 +95,32 @@ def _try_gemini_cycle(prompt: str, temperature: float = 0.3, max_tokens: int = 6
     retry=retry_if_exception_type(Exception),
     reraise=True,
 )
-def llm_call(prompt: str, temperature: float = 0.3, max_tokens: int = 600) -> str:
+def llm_call(prompt: str, temperature: float = 0.3, max_tokens: int = 600, conversation_id: str = "system") -> str:
     """
     Call an LLM. Tries OpenAI first, falls back to Gemini.
     Retries up to 3 times with exponential backoff.
     """
+    response = ""
+    model_used = "unknown"
+
     # Try OpenAI first
     if os.getenv("OPENAI_API_KEY") and OPENAI_AVAILABLE:
         try:
-            return _openai_call(prompt, temperature, max_tokens)
+            model_used = _openai_model()
+            response = _openai_call(prompt, temperature, max_tokens)
         except Exception:
             pass
 
     # Fall back to Gemini
-    if os.getenv("GEMINI_API_KEY") and GEMINI_AVAILABLE:
-        return _try_gemini_cycle(prompt, temperature, max_tokens)
+    if not response and os.getenv("GEMINI_API_KEY") and GEMINI_AVAILABLE:
+        model_used = _gemini_models()[0]
+        response = _try_gemini_cycle(prompt, temperature, max_tokens)
+
+    if response:
+        log_llm_call(conversation_id, prompt, response, model_used)
+        return response
 
     raise RuntimeError(
-        "No valid LLM API key found. "
+        "No valid LLM API key found or all models failed. "
         "Set OPENAI_API_KEY or GEMINI_API_KEY in your .env file."
     )

@@ -16,11 +16,18 @@ import json
 import sqlite3
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from core.database import get_business_meta, get_global_stats
 from core.logger import log_agent_event
 from core.llm_client import llm_call
+
+try:
+    from geopy.geocoders import Nominatim
+    from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+    GEOPY_AVAILABLE = True
+except ImportError:
+    GEOPY_AVAILABLE = False
 
 
 def _db() -> sqlite3.Connection:
@@ -236,7 +243,7 @@ def confirm_order(state: dict, **kwargs) -> dict:
             (
                 user_id,
                 cart_items[0]["service_id"],
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 round(total, 2),
                 items_json,
                 "Order confirmed via AI assistant",
@@ -255,7 +262,7 @@ def confirm_order(state: dict, **kwargs) -> dict:
         conn.execute(
             """UPDATE loyalty_points SET points = points + ?, updated_at = ?
                WHERE user_id = ?""",
-            (points_earned, datetime.utcnow().isoformat(), user_id),
+            (points_earned, datetime.now(timezone.utc).isoformat(), user_id),
         )
         conn.commit()
 
@@ -544,7 +551,7 @@ def check_availability(state: dict, **kwargs) -> dict:
         services = conn.execute("SELECT id, name, duration_min, price FROM services").fetchall()
 
         # Get existing bookings for next 7 days to find real availability
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         booked_slots = []
         for day_offset in range(1, 8):
             date = (now + timedelta(days=day_offset)).strftime("%Y-%m-%d")
@@ -629,7 +636,30 @@ No markdown, just JSON."""
     if not result.get("found", False):
         return {"success": False, "needs_info": True, "message": result.get("message", "Please provide your delivery address.")}
 
+    address_str = result.get("formatted", "")
     issues = result.get("issues", [])
+
+    # Real existence check with Geopy
+    if GEOPY_AVAILABLE and address_str:
+        try:
+            geolocator = Nominatim(user_agent="generic_ai_agent_audit")
+            location = geolocator.geocode(address_str, timeout=5)
+            if not location:
+                # Try without unit if present
+                simplified = f"{result.get('street', '')}, {result.get('city', '')}, {result.get('province', '')}, Canada"
+                location = geolocator.geocode(simplified, timeout=5)
+            
+            if not location:
+                issues.append("Address could not be verified in the global map service. Please check the spelling.")
+            else:
+                # Basic postal code confront (first 3 chars)
+                if result.get("postal_code") and result["postal_code"].strip()[:3].upper() not in location.address.upper():
+                    # Check if location address has the postal code at all
+                    if result["postal_code"].strip().replace(" ", "").upper() not in location.address.replace(" ", "").upper():
+                         issues.append(f"Postal code {result['postal_code']} might not match this location ({location.address[:50]}...)")
+        except (GeocoderTimedOut, GeocoderServiceError):
+            pass # Fallback to LLM validation if service is down
+
     if issues:
         return {
             "success": False,
@@ -880,7 +910,7 @@ def apply_loyalty_discount(state: dict, **kwargs) -> dict:
         new_points = loyalty["points"] - points_used
         conn.execute(
             "UPDATE loyalty_points SET points = ?, updated_at = ? WHERE user_id = ?",
-            (new_points, datetime.utcnow().isoformat(), user_id),
+            (new_points, datetime.now(timezone.utc).isoformat(), user_id),
         )
         conn.commit()
         return {
