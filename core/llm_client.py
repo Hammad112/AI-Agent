@@ -84,7 +84,11 @@ def _try_gemini_cycle(prompt: str, temperature: float = 0.3, max_tokens: int = 6
                 time.sleep(5)
             continue
 
-    raise RuntimeError(f"All Gemini models failed. Last error: {last_error}")
+    err_msg = f"All Gemini models failed. Last error: {last_error}"
+    if "429" in str(last_error) or "quota" in str(last_error).lower():
+        err_msg += "\n\n[TIP] You have hit your Gemini API quota limit (RESOURCE_EXHAUSTED). Please wait a moment or check your Google AI Studio billing/plan."
+    
+    raise RuntimeError(err_msg)
 
 
 # ── Public unified caller ────────────────────

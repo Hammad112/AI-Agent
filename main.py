@@ -50,57 +50,58 @@ def startup(file_path: str) -> tuple[str, str, list[dict]]:
       4. Enrich knowledge via LLM
       5. Generate synthetic data
     """
-    with console.status("[bold green]Starting up..."):
-        # 1. Database
-        console.print("[dim]Initializing database...[/]")
+    # 1. Database
+    with console.status("[bold green]Initializing database..."):
         init_db()
 
-        # Check if already processed
-        existing_name = get_business_meta("business_name")
-        if existing_name:
-            console.print(f"[yellow]Business already loaded:[/] {existing_name}")
-            answer = Prompt.ask("Reload from file?", choices=["y", "n"], default="n")
-            if answer == "n":
+    # Check if already processed
+    existing_name = get_business_meta("business_name")
+    if existing_name:
+        console.print(f"[yellow]Business already loaded:[/] {existing_name} (Database: {os.getenv('DB_NAME')})")
+        answer = Prompt.ask("Reload from file?", choices=["y", "n"], default="n")
+        if answer == "n":
+            with console.status("[bold green]Loading existing business data..."):
                 chunks = load_chunks()
                 btype = get_business_meta("business_type") or "general"
                 return existing_name, btype, chunks
 
-    # 2. Process document
-    console.print(f"[cyan]Processing:[/] {file_path}")
-    all_chunks = process_pdf(file_path)
-    console.print(f"  → Created [green]{len(all_chunks)}[/] knowledge chunks")
+    with console.status("[bold green]Starting up..."):
+        # 2. Process document
+        console.print(f"[cyan]Processing:[/] {file_path}")
+        all_chunks = process_pdf(file_path)
+        console.print(f"  → Created [green]{len(all_chunks)}[/] knowledge chunks")
 
-    # 3. Detect business type
-    sample_text = "\n".join(c.get("text", "")[:200] for c in all_chunks[:5])
-    with console.status("[bold]Detecting business type..."):
-        business_info = detect_business_type(sample_text)
-    business_name = business_info.get("business_name", "Business")
-    business_type = business_info.get("business_type", "general")
-    console.print(f"  → Detected: [bold]{business_name}[/] ({business_type})")
+        # 3. Detect business type
+        sample_text = "\n".join(c.get("text", "")[:200] for c in all_chunks[:5])
+        with console.status("[bold]Detecting business type..."):
+            business_info = detect_business_type(sample_text)
+        business_name = business_info.get("business_name", "Business")
+        business_type = business_info.get("business_type", "general")
+        console.print(f"  → Detected: [bold]{business_name}[/] ({business_type})")
 
-    set_business_meta("business_name", business_name)
-    set_business_meta("business_type", business_type)
+        set_business_meta("business_name", business_name)
+        set_business_meta("business_type", business_type)
 
-    # 4. Enrich knowledge
-    with console.status("[bold]Enriching knowledge base..."):
-        enrich_knowledge(sample_text, business_type, business_name)
-    console.print("  → Knowledge enrichment [green]complete[/]")
+        # 4. Enrich knowledge
+        with console.status("[bold]Enriching knowledge base..."):
+            enrich_knowledge(sample_text, business_type, business_name)
+        console.print("  → Knowledge enrichment [green]complete[/]")
 
-    # 5. Synthetic data
-    with console.status("[bold]Generating synthetic data..."):
-        generate_synthetic_data(business_type, business_name)
-    console.print("  → Synthetic data [green]generated[/]")
+        # 5. Synthetic data
+        with console.status("[bold]Generating synthetic data..."):
+            generate_synthetic_data(business_type, business_name)
+        console.print("  → Synthetic data [green]generated[/]")
 
-    # Store business hours if provided
-    hours_meta = get_business_meta("business_hours")
-    if not hours_meta:
-        # Try to find hours in chunks
-        for chunk in all_chunks:
-            if "hour" in chunk.get("section_title", "").lower() or "hour" in chunk.get("text", "").lower()[:50]:
-                set_business_meta("business_hours", chunk.get("text", "")[:500])
-                break
+        # Store business hours if provided
+        hours_meta = get_business_meta("business_hours")
+        if not hours_meta:
+            # Try to find hours in chunks
+            for chunk in all_chunks:
+                if "hour" in chunk.get("section_title", "").lower() or "hour" in chunk.get("text", "").lower()[:50]:
+                    set_business_meta("business_hours", chunk.get("text", "")[:500])
+                    break
 
-    return business_name, business_type, all_chunks
+        return business_name, business_type, all_chunks
 
 
 # ── Interactive PDF prompt ────────────────────
@@ -230,6 +231,10 @@ Examples:
             "Open [cyan].env[/] and add your GEMINI_API_KEY or OPENAI_API_KEY."
         )
         sys.exit(1)
+
+    # Set DB name based on PDF filename for isolation
+    db_name = f"{pdf_path.stem}.db"
+    os.environ["DB_NAME"] = db_name
 
     try:
         # Run startup pipeline

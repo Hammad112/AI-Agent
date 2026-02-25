@@ -18,7 +18,7 @@ This is a generic AI-powered customer service agent that handles orders, appoint
 ### Step 1: Open Terminal
 Open PowerShell or Command Prompt, then navigate to the project folder:
 ```powershell
-cd "d:\Personal\Upwork project\Generic AI Agent for Orders (30$)(ALI)\agent"
+cd "Folder path"
 ```
 
 ### Step 2: Create Virtual Environment

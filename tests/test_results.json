@@ -2,15 +2,19 @@
   {
     "suite": "Mario Pizza",
     "total": 12,
-    "passed": 12,
+    "passed": 0,
     "failed": 0,
-    "errors": []
+    "errors": [
+      "Setup: All Gemini models failed. Last error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on t"
+    ]
   },
   {
     "suite": "Bright Smile Dental",
     "total": 10,
-    "passed": 10,
+    "passed": 0,
     "failed": 0,
-    "errors": []
+    "errors": [
+      "Setup: All Gemini models failed. Last error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on t"
+    ]
   }
 ]
