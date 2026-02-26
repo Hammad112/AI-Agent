@@ -21,7 +21,7 @@ env/
 *.sqlite3
 
 # PDF files (user-provided, not part of repo)
-*.pdf
+
 
 # OS files
 .DS_Store
@@ -44,7 +44,7 @@ build/
 
 # LangGraph checkpoints
 .langgraph_cache/
-sample_pdfs/
+
 tests/generate_photography_evidence.py
 tests/generate_showroom_evidence.py
 tests/test_concurrency.py
