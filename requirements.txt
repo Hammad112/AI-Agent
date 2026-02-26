@@ -1,0 +1,36 @@
+# Core LLM providers
+google-genai
+openai
+
+# Agent framework
+langgraph
+langchain-core
+
+# PDF processing
+PyMuPDF
+
+# Data generation
+faker
+
+# Security
+bcrypt
+
+# Web search
+duckduckgo-search
+
+# CLI interface
+rich
+
+# Environment management
+python-dotenv
+
+# Retry logic
+tenacity
+
+# FastAPI server
+fastapi
+uvicorn[standard]
+# Documentation
+python-docx
+# Geolocation
+geopy
