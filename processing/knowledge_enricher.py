@@ -79,28 +79,23 @@ def enrich_knowledge(pdf_text: str, business_type: str, business_name: str = "")
         business_name = "the business"
 
     topics_prompt = f"""
-You are a knowledge base enricher for "{business_name}" ({business_type}).
+You are a strategic business analyst for "{business_name}" ({business_type}).
 
 Here is the existing knowledge from their PDF:
 ---
 {pdf_text[:3000]}
 ---
 
-List 8-10 important topics that would be valuable to add to this knowledge base
-but are NOT fully covered in the existing content. These are called "skills" —
-supplementary knowledge that helps the AI agent handle customer requests better.
+Identify 8-10 high-value knowledge topics ("skills") to add to this knowledge base.
+Include at least THREE analytical "Business Skills" — these are observations about customer behavior and cross-sell opportunities (e.g., "Customers ordering pizza usually want a cold beverage" or "Patients coming for cleanings are often interested in whitening").
 
 Focus on:
-- FAQs customers commonly ask for this type of business
-- Detailed product/service specifications or comparisons
-- Cross-selling and upselling strategies
-- Pricing tier breakdowns and value explanations
-- Booking and cancellation policies and best practices
-- Common tips or best practices for this business type
-- Seasonal offers or promotions structure
-- Staff qualifications and expertise areas
-- Customer care and complaint handling procedures
-- Industry-standard practices and quality markers
+- Analytical Business Skills (proactive upselling insights)
+- Frequently Asked Questions
+- Detailed service comparisons
+- Booking/Cancellation policies
+- Staff expertise & unique selling points
+- Seasonal promotion structures
 
 Return ONLY a JSON array of topic names:
 ["Topic 1", "Topic 2", ...]

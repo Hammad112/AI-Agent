@@ -13,6 +13,8 @@ import uuid
 import json
 from typing import TypedDict, Annotated
 import operator
+import re
+import sqlite3
 
 from langgraph.graph import StateGraph, END
 
@@ -78,6 +80,7 @@ def node_receive_input(state: AgentState) -> AgentState:
         "pending_slots": {},  # fields still needed
         "cart_active": False,
         "last_tool": None,
+        "suggestions_shown": [],  # Track session-level suggestions
     }
 
     return {**state, "history": history, "conversation_state": conv_state}
@@ -137,6 +140,7 @@ Rules:
   ask_recommendations, loyalty_question, goodbye]
 - plan: concise bullet plan (max 3 bullets)
 - tools: ONLY tools actually needed. Empty array [] for greetings/simple info.
+- If the customer asked multiple questions (e.g. price AND booking), ensure you activate ALL relevant intents and tools.
 - Do NOT activate tools unless clearly required by the query."""
 
     try:
@@ -146,7 +150,9 @@ Rules:
         result = json.loads(raw)
         intents = result.get("intents", ["ask_info"])
         plan = result.get("plan", "Address the customer query.")
-        activated = [t for t in result.get("tools", []) if t in TOOLS]
+        # FIX: Ensure unique tool activation to prevent duplicate calls causing pricing errors
+        raw_activated = [t for t in result.get("tools", []) if t in TOOLS]
+        activated = list(dict.fromkeys(raw_activated))
     except Exception as e:
         log_agent_event(state["conversation_id"], "analyze_error", {"error": str(e)})
         intents = ["ask_info"]
@@ -190,7 +196,7 @@ def node_rag_retrieval(state: AgentState) -> AgentState:
     if chunk_ids:
         log_chunk_retrieval(state["conversation_id"], chunk_ids)
 
-    customer_ctx = get_customer_context(state["user_id"])
+    customer_ctx = get_customer_context(state["user_id"], state["conversation_id"])
     global_stats = get_global_stats()
 
     return {
@@ -292,6 +298,9 @@ def node_execute_tools(state: AgentState) -> AgentState:
 # ─────────────────────────────────────────────
 
 def node_build_response(state: AgentState) -> AgentState:
+    conv_state = state.get("conversation_state", {})
+    suggestions_shown = conv_state.get("suggestions_shown", [])
+
     composite_prompt = build_composite_prompt(
         query=state["query"],
         retrieved_chunks=state["retrieved_chunks"],
@@ -302,11 +311,40 @@ def node_build_response(state: AgentState) -> AgentState:
         business_name=state["business_name"],
         business_type=state["business_type"],
         detected_intents=state.get("detected_intents", []),
-        conversation_state=state.get("conversation_state", {}),
+        conversation_state=conv_state,
     )
 
     response = llm_call(composite_prompt, temperature=0.5, max_tokens=800)
-    log_message(state["conversation_id"], "assistant", response)
+    
+    # ── Upsell Throttling Logic ──
+    # Track items already suggested to the user to prevent repetition
+    upsell_match = re.search(r"(?i)would you like to (?:add|book|include|try)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)", response)
+    if upsell_match:
+        item = upsell_match.group(1).strip()
+        if item not in suggestions_shown:
+            suggestions_shown.append(item)
+            conv_state["suggestions_shown"] = suggestions_shown
+            save_conversation_state(state["conversation_id"], conv_state)
+    
+    
+    # FINAL SANITIZATION: Ensure NO "Service X" leaks into human chat
+    # This acts as a safety barrier even if RAG or previous tool outputs used them.
+    sanitized = response
+    if "Service" in response:
+        conn = sqlite3.connect(os.getenv("DB_NAME", "business_agent.db"))
+        conn.row_factory = sqlite3.Row
+        try:
+            for match in re.findall(r'Service\s+(\d+)', response):
+                s_id = int(match)
+                row = conn.execute("SELECT name FROM services WHERE id = ?", (s_id,)).fetchone()
+                if row:
+                    sanitized = sanitized.replace(f"Service {s_id}", f"**{row['name']}**")
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    log_message(state["conversation_id"], "assistant", sanitized)
     log_agent_event(
         state["conversation_id"],
         "response_generated",
@@ -314,10 +352,10 @@ def node_build_response(state: AgentState) -> AgentState:
             "retrieved_chunks": len(state["retrieved_chunks"]),
             "activated_tools": state["activated_tools"],
             "detected_intents": state.get("detected_intents", []),
-            "response_length": len(response),
+            "response_length": len(sanitized),
         },
     )
-    return {**state, "response": response}
+    return {**state, "response": sanitized}
 
 
 # ─────────────────────────────────────────────

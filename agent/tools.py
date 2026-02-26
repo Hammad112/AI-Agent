@@ -37,6 +37,19 @@ def _db() -> sqlite3.Connection:
     return conn
 
 
+def _resolve_service_name(conn, service_id: int) -> str:
+    """Helper to get a human-readable service name for any ID."""
+    if not service_id:
+        return "Unknown Service"
+    row = conn.execute("SELECT name FROM services WHERE id = ?", (service_id,)).fetchone()
+    return row["name"] if row else f"Service {service_id}"
+
+
+def _generate_ref(prefix: str, db_id: int) -> str:
+    """Generate a customer-facing reference number."""
+    return f"{prefix}-{str(db_id).zfill(5)}"
+
+
 # ─────────────────────────────────────────────
 # Cart / Order Management Tools
 # ─────────────────────────────────────────────
@@ -243,7 +256,13 @@ def confirm_order(state: dict, **kwargs) -> dict:
                 }
             return {"success": False, "message": "Your cart is currently empty. What would you like to add?"}
 
-        total = sum(item["quantity"] * item["unit_price"] for item in cart_items)
+        # FIX: Calculate total fresh by summing quantity * unit_price from the cart table
+        total_row = conn.execute(
+            "SELECT SUM(quantity * unit_price) as total FROM cart WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        ).fetchone()
+        total = total_row["total"] if total_row["total"] else 0.0
+
         items_json = json.dumps([
             {"name": c["service_name"], "qty": c["quantity"], "price": c["unit_price"], "modifiers": c["modifiers"]}
             for c in cart_items
@@ -279,13 +298,16 @@ def confirm_order(state: dict, **kwargs) -> dict:
         )
         conn.commit()
 
+        order_ref = _generate_ref("ORDER", order_id)
+
         return {
             "success": True,
             "order_id": order_id,
+            "order_ref": order_ref,
             "items": json.loads(items_json),
             "total": round(total, 2),
             "points_earned": points_earned,
-            "message": f"✅ Order #{order_id} confirmed! Total: ${total:.2f}. You earned {points_earned} loyalty points.",
+            "message": f"✅ Order confirmed! Your reference number is {order_ref}. Total: ${total:.2f}. You earned {points_earned} loyalty points.",
         }
     finally:
         conn.close()
@@ -365,27 +387,56 @@ No markdown, just JSON."""
                 "message": f"I need a bit more information to complete the booking. Please provide: {', '.join(missing)}.",
             }
 
-        # Check for conflicts
+        # Check for conflicts and provider availability
         date_str = booking.get("date", "")
         time_str = booking.get("time", "")
-        scheduled_dt = f"{date_str}T{time_str}:00" if date_str and time_str else (datetime.utcnow() + timedelta(days=1)).isoformat()
+        if not date_str or not time_str:
+             return {"success": False, "message": "I need a specific date and time to book."}
+             
+        try:
+            req_dt = datetime.fromisoformat(f"{date_str}T{time_str}:00")
+            day_key = req_dt.strftime("%A")[:3].lower()
+        except ValueError:
+             return {"success": False, "message": "The date or time format is invalid."}
 
         svc_id = booking.get("service_id")
         prov_id = booking.get("provider_id")
-
-        # Check existing bookings for conflicts
+        
+        # 1. Validate Provider Schedule
+        assigned_provider = None
         if prov_id:
-            conflicts = conn.execute(
-                """SELECT COUNT(*) FROM orders
-                   WHERE provider_id = ? AND status IN ('pending','confirmed')
-                   AND scheduled_at LIKE ?""",
-                (prov_id, f"{date_str}%"),
-            ).fetchone()[0]
-            if conflicts > 3:
-                return {
-                    "success": False,
-                    "message": f"Provider is fully booked on {date_str}. Would you like a different date or provider?",
-                }
+            p = conn.execute("SELECT * FROM service_providers WHERE id = ?", (prov_id,)).fetchone()
+            if p:
+                sched = json.loads(p["schedule"]) if p["schedule"] else {}
+                if day_key not in sched:
+                    return {
+                        "success": False,
+                        "message": f"I'm sorry, {p['name']} is not available on {req_dt.strftime('%A')}s. They work: {', '.join(sched.keys())}."
+                    }
+                assigned_provider = p
+        else:
+            # Find any provider available on this day
+            for p in providers:
+                sched = json.loads(p["schedule"]) if p["schedule"] else {}
+                if day_key in sched:
+                    assigned_provider = p
+                    prov_id = p["id"]
+                    break
+            if not assigned_provider:
+                return {"success": False, "message": f"We are closed or have no providers available on {req_dt.strftime('%A')}s."}
+
+        # 2. Check existing bookings for conflicts
+        conflicts = conn.execute(
+            """SELECT COUNT(*) FROM orders
+                WHERE provider_id = ? AND status IN ('pending','confirmed')
+                AND scheduled_at = ?""",
+            (prov_id, req_dt.isoformat()),
+        ).fetchone()[0]
+        if conflicts > 0:
+            return {
+                "success": False,
+                "message": f"{assigned_provider['name']} already has a booking at {time_str} on {date_str}. Would you like a different time?",
+            }
 
         svc_row = conn.execute("SELECT * FROM services WHERE id = ?", (svc_id,)).fetchone() if svc_id else None
         svc_name = svc_row["name"] if svc_row else booking.get("service_name", "Service")
@@ -423,16 +474,19 @@ No markdown, just JSON."""
         # Generate .ics file
         _generate_ics(order_id, svc_name, start_dt, end_dt, prov_name)
 
+        booking_ref = _generate_ref("APPT", order_id)
+
         return {
             "success": True,
             "booking_id": order_id,
+            "booking_ref": booking_ref,
             "service": svc_name,
             "provider": prov_name or "First available",
             "date": date_str,
             "time": time_str,
             "duration_min": duration,
             "price": price,
-            "message": f"✅ Appointment #{order_id} confirmed: {svc_name} on {date_str} at {time_str} with {prov_name or 'first available'}. Duration: {duration} min. Price: ${price:.2f}.",
+            "message": f"✅ Appointment confirmed: {svc_name} on {date_str} at {time_str} with {prov_name or 'first available'}. Reference: {booking_ref}. Duration: {duration} min. Price: ${price:.2f}.",
         }
     finally:
         conn.close()
@@ -510,13 +564,16 @@ Interpret relative dates. No markdown, just JSON."""
         except ValueError:
             pass
 
+        booking_ref = _generate_ref("APPT", order["id"])
+
         return {
             "success": True,
             "booking_id": order["id"],
+            "booking_ref": booking_ref,
             "service": order["service_name"],
             "new_date": new_date,
             "new_time": new_time,
-            "message": f"✅ Appointment #{order['id']} for {order['service_name']} rescheduled to {new_date} at {new_time}.",
+            "message": f"✅ Appointment {booking_ref} for {order['service_name']} has been rescheduled to {new_date} at {new_time}.",
         }
     finally:
         conn.close()
@@ -542,12 +599,21 @@ def cancel_booking(state: dict, **kwargs) -> dict:
             (order["id"],),
         )
         conn.commit()
+        booking_ref = _generate_ref("APPT", order["id"])
+        # Format date for readability
+        try:
+             dt = datetime.fromisoformat(order["scheduled_at"].replace("T", " "))
+             dt_str = dt.strftime("%A, %B %d at %I:%M %p")
+        except:
+             dt_str = order["scheduled_at"]
+
         return {
             "success": True,
             "cancelled_booking_id": order["id"],
+            "booking_ref": booking_ref,
             "service": order["service_name"],
-            "scheduled_at": order["scheduled_at"],
-            "message": f"Booking #{order['id']} for {order['service_name']} has been cancelled.",
+            "scheduled_at": dt_str,
+            "message": f"✅ Your appointment for {order['service_name']} on {dt_str} has been successfully cancelled. Reference: {booking_ref}.",
         }
     finally:
         conn.close()
@@ -580,15 +646,30 @@ def check_availability(state: dict, **kwargs) -> dict:
             dt = now + timedelta(days=day_offset)
             date_str = dt.strftime("%Y-%m-%d")
             day_name = dt.strftime("%A")
-            if day_name == "Sunday":
+            day_key = day_name[:3].lower() # mon, tue, wed...
+            
+            # Find providers available on THIS day
+            available_today = []
+            for p in providers:
+                sched = json.loads(p["schedule"]) if p["schedule"] else {}
+                if day_key in sched:
+                    available_today.append(p)
+            
+            if not available_today:
                 continue
-            hours = [9, 10, 11, 13, 14, 15, 16] if day_name != "Saturday" else [9, 10, 11, 13]
-            for hour in hours:
+
+            # Check specific hours (simplified: 9-17)
+            for hour in range(9, 17):
                 slot_str = f"{date_str} {hour:02d}:00"
-                # Check if slot is not fully booked
-                bookings_at_slot = sum(1 for s, _ in booked_slots if s and slot_str.replace(" ", "T") in s)
-                if bookings_at_slot < len(providers):
-                    slots.append({"datetime": slot_str, "day": day_name, "available_providers": max(1, len(providers) - bookings_at_slot)})
+                # Check if slot is not fully booked across all available providers
+                bookings_at_slot = sum(1 for s, pid in booked_slots if s and slot_str.replace(" ", "T") in s and any(ap["id"] == pid for ap in available_today))
+                if bookings_at_slot < len(available_today):
+                    slots.append({
+                        "datetime": slot_str, 
+                        "day": day_name, 
+                        "available_providers_count": len(available_today) - bookings_at_slot,
+                        "providers": [p["name"] for p in available_today]
+                    })
 
         return {
             "success": True,
@@ -633,9 +714,8 @@ Extract the following. Return ONLY JSON:
 }}
 
 Rules for Canadian postal codes: format A1A 1A1 (letter-digit-letter space digit-letter-digit).
-First letter indicates province (e.g. M = Ontario/Toronto, V = BC, K/N = Ontario, T = Alberta).
-For US zip codes: 5 digits or 5+4 format.
-If the postal code doesn't match the city/province, flag it in issues.
+CROSS-REFERENCE CITY/PROVINCE: Ensure the first letter of the postal code matches the province (e.g. M=Toronto, K/N=Ontario, T=Alberta).
+If the address is valid but the postal code is slightly formatted differently (e.g. "M4K6B2" vs "M4K 6B2"), normalize it to "A1A 1A1" and set valid=true.
 If no address found: {{"found": false, "message": "Please provide your delivery address."}}
 No markdown, just JSON."""
 
@@ -650,12 +730,22 @@ No markdown, just JSON."""
         return {"success": False, "needs_info": True, "message": result.get("message", "Please provide your delivery address.")}
 
     address_str = result.get("formatted", "")
+    postal_code = result.get("postal_code", "").upper().replace(" ", "")
     issues = result.get("issues", [])
 
+    # Robust Regex Validation for Canadian Postal Codes
+    is_canadian = result.get("country", "").lower() == "canada" or result.get("province", "") in ["ON", "QC", "BC", "AB", "MB", "SK", "NS", "NB", "PE", "NL", "YT", "NT", "NU"]
+    if is_canadian and postal_code:
+        if not re.match(r"^[A-Z]\d[A-Z]\d[A-Z]\d$", postal_code):
+            issues.append("Invalid Canadian postal code format. Should be A1A 1A1.")
+        else:
+            # Re-format with space
+            result["postal_code"] = f"{postal_code[:3]} {postal_code[3:]}"
+
     # Real existence check with Geopy
-    if GEOPY_AVAILABLE and address_str:
+    if GEOPY_AVAILABLE and address_str and not issues:
         try:
-            geolocator = Nominatim(user_agent="generic_ai_agent_audit")
+            geolocator = Nominatim(user_agent="generic_ai_agent_business")
             location = geolocator.geocode(address_str, timeout=5)
             if not location:
                 # Try without unit if present
@@ -663,13 +753,18 @@ No markdown, just JSON."""
                 location = geolocator.geocode(simplified, timeout=5)
             
             if not location:
-                issues.append("Address could not be verified in the global map service. Please check the spelling.")
+                # If it's a very specific address, Nominatim sometimes fails. 
+                # If the postal code is valid and city matches, we can be more lenient.
+                pass 
             else:
                 # Basic postal code confront (first 3 chars)
-                if result.get("postal_code") and result["postal_code"].strip()[:3].upper() not in location.address.upper():
-                    # Check if location address has the postal code at all
-                    if result["postal_code"].strip().replace(" ", "").upper() not in location.address.replace(" ", "").upper():
-                         issues.append(f"Postal code {result['postal_code']} might not match this location ({location.address[:50]}...)")
+                pc_prefix = result.get("postal_code", "")[:3].upper()
+                if pc_prefix and pc_prefix not in location.address.upper():
+                    # Some Nominatim responses are weird, double check
+                    if result.get("postal_code", "").replace(" ", "").upper() not in location.address.replace(" ", "").upper():
+                         # Only flag if it's a major mismatch
+                         if result.get("city", "").lower() not in location.address.lower():
+                            issues.append(f"Postal code {result['postal_code']} might not match this location ({location.address[:50]}...)")
         except (GeocoderTimedOut, GeocoderServiceError):
             pass # Fallback to LLM validation if service is down
 
@@ -678,7 +773,7 @@ No markdown, just JSON."""
             "success": False,
             "address": result,
             "issues": issues,
-            "message": f"There are issues with your address: {'; '.join(issues)}. Could you please verify?",
+            "message": f"I had a bit of trouble verifying that address: {'; '.join(issues)}. Could you please double-check the spelling or postal code?",
         }
 
     # Store address on the user profile
@@ -998,45 +1093,32 @@ No markdown, just JSON."""
         try:
             dispute = json.loads(raw)
         except json.JSONDecodeError:
-            dispute = {"understood": False}
+            return {"success": False, "message": "I'm sorry, I couldn't process the details of your complaint. Could you please describe it again?"}
 
-        log_agent_event(state.get("conversation_id", ""), "dispute_filed", {
-            "user_id": user_id, "query": query, "dispute": dispute,
-        })
+        # Log the complaint to the DB
+        cur = conn.execute(
+            """INSERT INTO complaints (user_id, order_id, conversation_id, complaint_type, description, suggested_resolution)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                user_id,
+                dispute.get("order_id"),
+                state.get("conversation_id"),
+                dispute.get("complaint_type", "other"),
+                dispute.get("description", query),
+                dispute.get("suggested_resolution", "Review needed")
+            )
+        )
+        complaint_id = cur.lastrowid
+        conn.commit()
+        
+        ref_id = _generate_ref("REF", complaint_id)
 
-        if dispute.get("understood", False):
-            # Persist complaint to DB
-            try:
-                conn.execute(
-                    """INSERT INTO complaints (user_id, order_id, complaint_type, description, suggested_resolution)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (
-                        user_id,
-                        dispute.get("order_id"),
-                        dispute.get("complaint_type"),
-                        dispute.get("description"),
-                        dispute.get("suggested_resolution"),
-                    ),
-                )
-                conn.commit()
-            except Exception as e:
-                log_agent_event(state.get("conversation_id", ""), "dispute_storage_error", {"error": str(e)})
-
-            return {
-                "success": True,
-                "dispute_logged": True,
-                "order_id": dispute.get("order_id"),
-                "complaint_type": dispute.get("complaint_type"),
-                "suggested_resolution": dispute.get("suggested_resolution"),
-                "message": f"I understand your concern about order #{dispute.get('order_id', '?')}. "
-                           f"Issue: {dispute.get('description', 'noted')}. "
-                           f"Suggested resolution: {dispute.get('suggested_resolution', 'Our team will review this.')}. "
-                           f"This has been logged and escalated.",
-            }
         return {
             "success": True,
-            "dispute_logged": True,
-            "message": "I'm sorry about this issue. I've logged your complaint and our team will review it. Could you provide more details about the order?",
+            "complaint_id": complaint_id,
+            "complaint_ref": ref_id,
+            "details": dispute,
+            "message": f"I've logged your concern regarding Order #{dispute.get('order_id') or 'unknown'}. Your reference number is {ref_id}. Our team will review this and I'll make sure we address it right away.",
         }
     finally:
         conn.close()

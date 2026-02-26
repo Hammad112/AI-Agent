@@ -161,7 +161,7 @@ No markdown, just JSON."""
     return [{"topic": "Full Profile", "data": ctx_text}]
 
 
-def get_customer_context(user_id: int) -> dict:
+def get_customer_context(user_id: int, session_id: str = "") -> dict:
     """Gather all customer data for context window."""
     db_name = os.getenv("DB_NAME", "business_agent.db")
     conn = sqlite3.connect(db_name)
@@ -186,14 +186,28 @@ def get_customer_context(user_id: int) -> dict:
         ).fetchone()
 
         events = conn.execute(
-            "SELECT * FROM calendar_events WHERE user_id = ? AND status != 'cancelled' ORDER BY start_time LIMIT 5",
+            """SELECT e.*, s.name as service_name FROM calendar_events e
+               LEFT JOIN orders o ON e.order_id = o.id
+               LEFT JOIN services s ON o.service_id = s.id
+               WHERE e.user_id = ? AND e.status != 'cancelled' 
+               ORDER BY e.start_time LIMIT 5""",
             (user_id,),
         ).fetchall()
 
-        cart_items = conn.execute(
-            "SELECT * FROM cart WHERE user_id = ?",
-            (user_id,),
-        ).fetchall()
+        if session_id:
+            cart_items = conn.execute(
+                """SELECT c.*, s.name as service_name FROM cart c
+                   LEFT JOIN services s ON c.service_id = s.id
+                   WHERE c.user_id = ? AND c.session_id = ?""",
+                (user_id, session_id),
+            ).fetchall()
+        else:
+            cart_items = conn.execute(
+                """SELECT c.*, s.name as service_name FROM cart c
+                   LEFT JOIN services s ON c.service_id = s.id
+                   WHERE c.user_id = ?""",
+                (user_id,),
+            ).fetchall()
 
         # Recent complaints
         complaints = conn.execute(
@@ -221,7 +235,7 @@ def get_customer_context(user_id: int) -> dict:
             "family_members": user["family_members"],
             "loyalty_points": loyalty["points"] if loyalty else 0,
             "loyalty_tier": loyalty["tier"] if loyalty else "bronze",
-            "usual_favorite": fav["name"] if fav else None,
+            "usual_favorite": fav["name"] if fav and fav["name"] else "our standard services",
             "usual_favorite_count": fav["cnt"] if fav else 0,
             "recent_orders": [dict(o) for o in orders],
             "recent_complaints": [dict(c) for c in complaints],
@@ -310,31 +324,49 @@ FLOW: Customer was ordering. The cart may be empty now. Ask if they want to star
     if usual_fav:
         fav_instruction = f"\nNote: This customer usually orders '{usual_fav}'. Remind them if relevant."
 
-    # Family cross-sell
+    # Family cross-sell (Relationship-aware)
     family_members = customer_context.get("family_members")
     family_instruction = ""
     if family_members and family_members != "[]":
         try:
             fam_list = json.loads(family_members) if isinstance(family_members, str) else family_members
             if fam_list:
-                names = ", ".join(f"{m.get('name', '')} ({m.get('relation', '')})" for m in fam_list)
-                family_instruction = f"\nFamily members on file: {names}. Suggest services for them when appropriate."
+                # Relation filter: Match query term to relationship
+                match_found = False
+                q_low = query.lower()
+                rel_map = {"wife": ("spouse", "Female"), "husband": ("spouse", "Male"), "son": ("child", "Male"), "daughter": ("child", "Female")}
+                
+                for term, (rel, gen) in rel_map.items():
+                    if term in q_low:
+                        matches = [m for m in fam_list if m.get("relation") == rel and m.get("gender") == gen]
+                        if matches:
+                            names = ", ".join(m.get("name", "") for m in matches)
+                            family_instruction = f"\nNote: The customer mentioned '{term}'. Suggest {names} (on file) if relevant."
+                            match_found = True
+                            break
+                        else:
+                            family_instruction = f"\nNote: The customer mentioned '{term}', but you don't have a {term} on file. Ask if they'd like to add her/him."
+                            match_found = True
+                            break
+                
+                if not match_found:
+                    # Default generic family mention
+                    names = ", ".join(f"{m.get('name', '')} ({m.get('relation', '')})" for m in fam_list)
+                    family_instruction = f"\nFamily members on file: {names}. Suggest services for them when appropriate."
         except (json.JSONDecodeError, TypeError):
             pass
 
     prompt = f"""You are a friendly, professional customer service agent for "{business_name}" ({business_type}).
 
 STRICT RULES:
-- NEVER ask the customer for prices. All prices are in the KNOWLEDGE BASE below.
-- If an item doesn't have a price in the knowledge base, say: "The price will be confirmed/adjusted at checkout." 
-- NEVER GUESS or INVENT prices.
-- All answers must be grounded in the knowledge base below.
-- If a tool returned results, base your answer on those results.
-- If information is missing, ask the customer — do NOT guess.
-- Be warm, empathetic, and helpful. Offer proactive suggestions.
-- Try to upsell and cross-sell when natural. Be a good salesperson.
-- Format prices as "$X.XX".
-- Keep responses conversational but concise.
+- SERVICE NAMES: NEVER use internal IDs like "Service 4". ALWAYS use the natural service name provided in tool results or context.
+- PRICING GAPS: If price is missing or "$0.00", explicitly say "Please call us for current pricing" or "Contact us for a quote". 
+- NATURAL UPSELL: Suggest ONE relevant item per session only if it adds real value (e.g. "Since you're getting a pizza, would you like a drink?"). DO NOT repeat upsells.
+- CONFIRMATION: Always include Order/Booking/Complaint Reference numbers (e.g., ORDER-123, APPT-456, REF-789) provided by the tools.
+- ADDRESSES: Acknowledge the street and city when confirming delivery.
+- COMPLAINTS: Acknowledge grievances warmly, confirm they are logged, and provide a reference number (REF-123).
+- LOYALTY: Mention point balance and tier if relevant to the turn.
+- GROUNDING: NEVER GUESS or INVENT prices. If information is missing, ask the customer — do NOT guess.
 - Address ALL detected intents: {detected_intents or ['general']}
 {flow_instructions}{fav_instruction}{family_instruction}
 

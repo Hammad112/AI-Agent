@@ -291,10 +291,18 @@ Respond with only the JSON, no markdown.
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
+        # Better fallbacks based on type
+        if "pizza" in business_type.lower() or "restaurant" in business_type.lower():
+            fallback_names = ["Margherita Pizza", "Pepperoni Pizza", "Caesar Salad", "Garlic Bread", "Sprite", "Coke", "Pasta Carbonara", "Tiramisu"]
+        elif "dental" in business_type.lower() or "clinic" in business_type.lower():
+            fallback_names = ["Dental Cleaning", "Teeth Whitening", "Checkup", "X-Ray", "Consultation", "Filling", "Crown", "Root Canal"]
+        else:
+            fallback_names = [f"General Service {i}" for i in range(1, 9)]
+        
         data = {
             "services": [
-                {"name": f"Service {i}", "description": "Standard service", "price": round(random.uniform(20, 200), 2), "duration_min": 30, "category": "General", "modifiers": ""}
-                for i in range(1, 11)
+                {"name": name, "description": "Standard service", "price": round(random.uniform(20, 200), 2), "duration_min": 30, "category": "General", "modifiers": ""}
+                for name in fallback_names
             ],
             "provider_specialties": ["General", "Senior", "Junior", "Expert", "Trainee"],
             "order_status_options": ["completed", "completed", "completed", "cancelled", "pending"],
@@ -320,8 +328,20 @@ Respond with only the JSON, no markdown.
         specialties = data.get("provider_specialties", ["General"] * 5)
         provider_ids = []
         provider_names = []
+        # Default schedule logic based on business type
+        default_sched = {"mon": "9-17", "tue": "9-17", "wed": "9-17", "thu": "9-17", "fri": "9-17"}
+        if "dental" in business_type.lower() or "clinic" in business_type.lower():
+             # Align with RAG knowledge for Bright Smile
+             default_sched = {"mon": "9-17", "wed": "9-17", "fri": "9-17", "sat": "9-13"}
+        elif "pizza" in business_type.lower() or "restaurant" in business_type.lower():
+             default_sched = {"mon": "11-23", "tue": "11-23", "wed": "11-23", "thu": "11-23", "fri": "11-23", "sat": "11-23", "sun": "11-23"}
+
         for spec in specialties:
             name = fake.name()
+            # Special case: Ensure Dr. Sarah Chen is in the DB if it's dental
+            if "dental" in business_type.lower() and spec == specialties[0]:
+                 name = "Dr. Sarah Chen"
+
             provider_names.append(name)
             cur = conn.execute(
                 "INSERT INTO service_providers (name, specialty, rating, available, schedule) VALUES (?, ?, ?, ?, ?)",
@@ -329,8 +349,8 @@ Respond with only the JSON, no markdown.
                     name,
                     spec,
                     round(random.uniform(3.8, 5.0), 1),
-                    random.choice([1, 1, 1, 0]),
-                    json.dumps({"mon": "9-17", "tue": "9-17", "wed": "9-17", "thu": "9-17", "fri": "9-17"}),
+                    1 if name == "Dr. Sarah Chen" else random.choice([1, 1, 1, 0]),
+                    json.dumps(default_sched),
                 ),
             )
             provider_ids.append(cur.lastrowid)
@@ -338,13 +358,20 @@ Respond with only the JSON, no markdown.
         # Create synthetic users with family data
         user_ids = []
         families = [
-            ("spouse", "child"), ("spouse",), ("child", "child"),
-            ("spouse", "child", "child"), (), ("parent",),
+            ([("spouse", "Female"), ("child", "Male")], "married_with_child"),
+            ([("spouse", "Male")], "married"),
+            ([("child", "Female"), ("child", "Male")], "children"),
+            ([("spouse", "Female"), ("child", "Female"), ("child", "Male")], "large_family"),
+            ([], "single"),
+            ([("parent", "Female")], "parent_on_file"),
         ]
         for _ in range(20):
             pw_hash = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode()
-            family = random.choice(families)
-            family_json = json.dumps([{"relation": r, "name": fake.first_name()} for r in family]) if family else "[]"
+            family_info, _label = random.choice(families)
+            family_json = json.dumps([
+                {"relation": r, "gender": g, "name": fake.first_name_female() if g == "Female" else fake.first_name_male()} 
+                for r, g in family_info
+            ]) if family_info else "[]"
             cur = conn.execute(
                 "INSERT OR IGNORE INTO users (username, email, password_hash, full_name, phone, address, postal_code, city, family_members) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (

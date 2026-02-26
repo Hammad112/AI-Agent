@@ -9,7 +9,7 @@ import os
 import time
 import json
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
+import sqlite3
 # Try to import LLM clients
 try:
     from openai import OpenAI

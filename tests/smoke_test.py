@@ -138,6 +138,32 @@ def run_test_suite(
                 # Basic validation
                 if response and len(response) > 10:
                     print(f"    AGENT: {response[:120]}{'...' if len(response) > 120 else ''}")
+                    
+                    # SQL Assertion: Verify Order Total Calculation (Iteration 4)
+                    if label == "Confirm":
+                        import sqlite3
+                        conn = sqlite3.connect(os.environ["DB_NAME"])
+                        try:
+                            # Check the most recent order
+                            order = conn.execute("SELECT id, total_price FROM orders ORDER BY id DESC LIMIT 1").fetchone()
+                            if order:
+                                o_id = order[0]
+                                stated_total = order[1]
+                                # Sum individual line items from cart (or history if cart cleared)
+                                # In our tools.py, confirm_order clears cart but we can check items_json
+                                items_row = conn.execute("SELECT items_json FROM orders WHERE id = ?", (o_id,)).fetchone()
+                                if items_row:
+                                    items = json.loads(items_row[0])
+                                    calc_total = sum(item["qty"] * item["price"] for item in items)
+                                    if abs(stated_total - calc_total) > 0.01:
+                                        print(f"    [FAIL] SQL Discrepancy: Order {o_id} Total={stated_total}, Sum={calc_total}")
+                                        results["failed"] += 1
+                                        results["errors"].append(f"SQL Discrepancy: {stated_total} != {calc_total}")
+                                    else:
+                                        print(f"    [PASS] SQL Total Verified: {stated_total}")
+                        finally:
+                            conn.close()
+
                     print(f"    [PASS] ({elapsed:.1f}s)")
                     results["passed"] += 1
                 else:

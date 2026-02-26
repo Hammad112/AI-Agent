@@ -77,7 +77,7 @@ def _intelligent_chunk(text: str, page_num: int) -> list[dict]:
 
     lines = text.split("\n")
 
-    for line in lines:
+    for i, line in enumerate(lines):
         stripped = line.strip()
 
         # Detect headers (markdown or uppercase titles)
@@ -85,15 +85,14 @@ def _intelligent_chunk(text: str, page_num: int) -> list[dict]:
         if stripped.startswith("#"):
             is_header = True
             header_text = stripped.lstrip("#").strip()
-        elif stripped.isupper() and len(stripped) > 3 and not stripped.startswith("|"):
+        elif stripped.isupper() and len(stripped) > 3 and not stripped.startswith("|") and len(stripped.split()) < 8:
             is_header = True
             header_text = stripped
 
         if is_header:
-            # Save previous chunk
             if current_text_lines:
                 chunk_text = "\n".join(current_text_lines).strip()
-                if chunk_text and len(chunk_text) > 20:
+                if chunk_text:
                     chunks.append({
                         "page_num": page_num,
                         "section_title": current_section or "General",
@@ -103,41 +102,42 @@ def _intelligent_chunk(text: str, page_num: int) -> list[dict]:
             current_section = header_text
             continue
 
-        # Detect table rows (keep together with current section)
-        if stripped.startswith("|"):
+        # Detect table rows or Menu Items (e.g. "Pizza .... $10")
+        # We protect these from being split across chunks
+        is_menu_item = False
+        if stripped.startswith("|") or "..." in stripped or "$" in stripped:
+             if len(stripped) > 10:
+                 is_menu_item = True
+
+        if is_menu_item:
             current_text_lines.append(stripped)
             continue
 
-        # Detect bullet points
-        if re.match(r'^[-*+] ', stripped) or re.match(r'^\d+\.\s', stripped):
-            current_text_lines.append(stripped)
-            continue
-
-        # Empty line = potential paragraph break
+        # Double newline = Strong Paragraph Break
         if not stripped:
-            joined = "\n".join(current_text_lines).strip()
-            if joined and len(joined) > 20:
-                # If chunk is getting large, save it
-                if len(joined) > 800:
+            if i > 0 and not lines[i-1].strip():
+                joined = "\n".join(current_text_lines).strip()
+                if joined and len(joined) > 100:
                     chunks.append({
                         "page_num": page_num,
                         "section_title": current_section or "General",
                         "text": joined,
                     })
-                    current_text_lines = []
+                    # Use semantic overlap: keep the last 2 lines for context
+                    current_text_lines = current_text_lines[-2:] if len(current_text_lines) > 2 else []
             continue
 
         current_text_lines.append(stripped)
 
-        # Safety: if accumulated text is very large, flush
+        # Safety: Higher threshold for logical chunks
         joined = "\n".join(current_text_lines)
-        if len(joined) > 1200:
+        if len(joined) > 1800:
             chunks.append({
                 "page_num": page_num,
                 "section_title": current_section or "General",
                 "text": joined.strip(),
             })
-            current_text_lines = []
+            current_text_lines = current_text_lines[-3:] # Heavier overlap
 
     # Final chunk
     if current_text_lines:
