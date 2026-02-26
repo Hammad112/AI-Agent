@@ -309,7 +309,30 @@ JSON array of tools to activate:"""
 
 def node_execute_tools(state: AgentState) -> AgentState:
     tool_results: dict = {}
-    for tool_name in state["activated_tools"]:
+    
+    # Priority for tool execution to avoid state race conditions:
+    # 1. Modifying tools (add/remove from cart, set delivery)
+    # 2. Informational/Viewing tools (view_cart, get_pricing)
+    # 3. Finalizing tools (confirm_order, book_appointment)
+    PRIORITY = {
+        "add_to_cart": 1,
+        "remove_from_cart": 1,
+        "set_delivery_type": 1,
+        "validate_address": 1,
+        "view_cart": 2,
+        "get_pricing": 2,
+        "get_recommendations": 2,
+        "check_availability": 2,
+        "confirm_order": 9,
+        "book_appointment": 9,
+    }
+    
+    sorted_tools = sorted(
+        state["activated_tools"],
+        key=lambda x: PRIORITY.get(x, 5)
+    )
+
+    for tool_name in sorted_tools:
         if tool_name not in TOOLS:
             continue
         tool_fn, _ = TOOLS[tool_name]

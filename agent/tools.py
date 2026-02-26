@@ -223,12 +223,21 @@ def confirm_order(state: dict, **kwargs) -> dict:
     session_id = state.get("conversation_id", "")
     conn = _db()
     try:
+        # Check if cart exists for THIS session and user
         cart_items = conn.execute(
             "SELECT * FROM cart WHERE user_id = ? AND session_id = ?",
             (user_id, session_id),
         ).fetchall()
+        
         if not cart_items:
-            return {"success": False, "message": "Your cart is empty. Add items before confirming."}
+            # Check if there are ANY items in cart for this user (could be different session)
+            any_items = conn.execute("SELECT COUNT(*) FROM cart WHERE user_id = ?", (user_id,)).fetchone()[0]
+            if any_items > 0:
+                return {
+                    "success": False, 
+                    "message": "I found items in your cart from a different session, but your current session is empty. Please verify your order."
+                }
+            return {"success": False, "message": "Your cart is currently empty. What would you like to add?"}
 
         total = sum(item["quantity"] * item["unit_price"] for item in cart_items)
         items_json = json.dumps([
@@ -992,6 +1001,23 @@ No markdown, just JSON."""
         })
 
         if dispute.get("understood", False):
+            # Persist complaint to DB
+            try:
+                conn.execute(
+                    """INSERT INTO complaints (user_id, order_id, complaint_type, description, suggested_resolution)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        user_id,
+                        dispute.get("order_id"),
+                        dispute.get("complaint_type"),
+                        dispute.get("description"),
+                        dispute.get("suggested_resolution"),
+                    ),
+                )
+                conn.commit()
+            except Exception as e:
+                log_agent_event(state.get("conversation_id", ""), "dispute_storage_error", {"error": str(e)})
+
             return {
                 "success": True,
                 "dispute_logged": True,

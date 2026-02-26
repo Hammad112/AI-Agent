@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS enriched_knowledge (
     created_at  TEXT    DEFAULT (datetime('now'))
 );
 
+-- Customer complaints and disputes
+CREATE TABLE IF NOT EXISTS complaints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER REFERENCES users(id),
+    order_id        INTEGER REFERENCES orders(id),
+    complaint_type  TEXT,
+    description     TEXT,
+    suggested_resolution TEXT,
+    status          TEXT    DEFAULT 'open',
+    created_at      TEXT    DEFAULT (datetime('now'))
+);
+
 -- Chat messages
 CREATE TABLE IF NOT EXISTS conversations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

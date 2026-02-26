@@ -195,6 +195,13 @@ def get_customer_context(user_id: int) -> dict:
             (user_id,),
         ).fetchall()
 
+        # Recent complaints
+        complaints = conn.execute(
+            """SELECT complaint_type, description, status, created_at FROM complaints 
+               WHERE user_id = ? ORDER BY created_at DESC LIMIT 3""",
+            (user_id,),
+        ).fetchall()
+
         # Most ordered service
         fav = conn.execute(
             """SELECT s.name, COUNT(o.id) as cnt FROM orders o
@@ -217,6 +224,7 @@ def get_customer_context(user_id: int) -> dict:
             "usual_favorite": fav["name"] if fav else None,
             "usual_favorite_count": fav["cnt"] if fav else 0,
             "recent_orders": [dict(o) for o in orders],
+            "recent_complaints": [dict(c) for c in complaints],
             "upcoming_events": [dict(e) for e in events],
             "current_cart": [dict(c) for c in cart_items],
         }
@@ -261,6 +269,15 @@ def build_composite_prompt(
     if tool_results:
         for tool_name, result in tool_results.items():
             tools_text += f"\n--- {tool_name} ---\n{json.dumps(result, indent=2, default=str)}\n"
+
+    # Complaints text
+    complaints_list = customer_context.get("recent_complaints", [])
+    complaints_text = ""
+    if complaints_list:
+        complaints_text = "PAST DISPUTES/COMPLAINTS:\n" + "\n".join(
+            f"- [{c['created_at']}] {c['complaint_type']}: {c['description']} (Status: {c['status']})"
+            for c in complaints_list
+        )
 
     # Active conversational flow state
     conv_state = conversation_state or {}
@@ -318,6 +335,8 @@ KNOWLEDGE BASE:
 
 CUSTOMER PROFILE:
 {customer_text}
+
+{complaints_text}
 
 TOOL RESULTS:
 {tools_text or 'None'}

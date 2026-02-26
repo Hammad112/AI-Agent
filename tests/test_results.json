@@ -5,7 +5,7 @@
     "passed": 0,
     "failed": 0,
     "errors": [
-      "Setup: All Gemini models failed. Last error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on t"
+      "Setup: All Gemini models failed. Last error: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid. Please pass a valid API key.', 'status': 'INVALID_ARGUMENT', 'details': [{'@type': 't"
     ]
   },
   {
@@ -14,7 +14,7 @@
     "passed": 0,
     "failed": 0,
     "errors": [
-      "Setup: All Gemini models failed. Last error: 429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': 'You exceeded your current quota, please check your plan and billing details. For more information on t"
+      "Setup: All Gemini models failed. Last error: 400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': 'API key not valid. Please pass a valid API key.', 'status': 'INVALID_ARGUMENT', 'details': [{'@type': 't"
     ]
   }
 ]
