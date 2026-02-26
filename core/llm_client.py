@@ -25,6 +25,24 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# ── Cached client singletons (avoid per-call instantiation overhead) ────────
+_openai_client: "OpenAI | None" = None
+_gemini_client = None
+
+
+def _get_openai_client() -> "OpenAI":
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    return _openai_client
+
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        _gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    return _gemini_client
+
 
 # Read model names from environment (with sensible defaults)
 def _openai_model() -> str:
@@ -44,7 +62,7 @@ def _openai_call(prompt: str, temperature: float = 0.3, max_tokens: int = 600) -
     if not api_key or not OPENAI_AVAILABLE:
         raise RuntimeError("OpenAI not available")
 
-    client = OpenAI(api_key=api_key)
+    client = _get_openai_client()
     response = client.chat.completions.create(
         model=_openai_model(),
         messages=[{"role": "user", "content": prompt}],
@@ -61,7 +79,7 @@ def _try_gemini_cycle(prompt: str, temperature: float = 0.3, max_tokens: int = 6
     if not api_key or not GEMINI_AVAILABLE:
         raise RuntimeError("Gemini not available")
 
-    client = genai.Client(api_key=api_key)
+    client = _get_gemini_client()
     models = _gemini_models()
     last_error = None
 

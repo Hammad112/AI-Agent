@@ -44,3 +44,13 @@ build/
 
 # LangGraph checkpoints
 .langgraph_cache/
+sample_pdfs/
+tests/generate_photography_evidence.py
+tests/generate_showroom_evidence.py
+tests/test_concurrency.py
+tests/photography_evidence_report.md
+tests/showroom_evidence_report.md
+sample_pdfs/mario_pizza.md
+sample_pdfs/showroom.md
+sample_pdfs/photography.md
+

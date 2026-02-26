@@ -87,115 +87,93 @@ def node_receive_input(state: AgentState) -> AgentState:
 # Node: planner
 # ─────────────────────────────────────────────
 
-def node_planner(state: AgentState) -> AgentState:
+def node_analyze(state: AgentState) -> AgentState:
     """
-    Analyzes the query, history, retrieved knowledge, and customer context
-    to create a high-level internal plan before tool selection or response.
+    MERGED node: detect_intents + planner + route_tools in ONE LLM call.
+    Saves 2 full LLM round-trips per turn while preserving all logic.
     """
-    query = state["query"]
-    history_snippet = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in state["history"][-4:]
-    )
-    
-    # Context for planning
-    pdf_context = "\n".join(
-        f"- {c.get('section_title', 'Info')}: {c.get('text', '')[:150]}" 
-        for c in state["retrieved_chunks"][:3]
-    )
-    customer_info = json.dumps(state["customer_context"], indent=2, default=str)[:1000]
-
-    prompt = f"""You are the Planning Node of a customer service AI agent for "{state['business_name']}".
-Your job is to create a multi-step internal plan to resolve the customer's request.
-
-Customer Query: "{query}"
-Recent History:
-{history_snippet or 'None'}
-
-Retrieved Knowledge:
-{pdf_context or 'None'}
-
-Customer Info:
-{customer_info}
-
-Instructions:
-1. Identify the core intent and any secondary intents.
-2. Determine if info is missing from the customer's request.
-3. Decide if data tools (cart, booking, etc.) are needed.
-4. Plan how to address the customer (tone, upsell opportunities, family members).
-5. Output a bulleted plan for the agent to follow.
-
-Internal Plan (concise):"""
-
-    try:
-        plan = llm_call(prompt, temperature=0.1, max_tokens=300, conversation_id=state["conversation_id"])
-    except Exception:
-        plan = "Address the customer query using available tools and knowledge."
-
-    log_agent_event(state["conversation_id"], "internal_planning", {"plan": plan})
-    return {**state, "internal_plan": plan}
-
-
-# ─────────────────────────────────────────────
-# Node: detect_intents
-# ─────────────────────────────────────────────
-
-def node_detect_intents(state: AgentState) -> AgentState:
-    """Detect multiple intents in a single message (e.g. question + booking)."""
     query = state["query"]
     history_snippet = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in state["history"][-4:]
     )
     conv_state = state.get("conversation_state", {})
+    customer_tier = state.get("customer_context", {}).get("loyalty_tier", "bronze")
+    pdf_context = "\n".join(
+        f"- {c.get('section_title', 'Info')}: {c.get('text', '')[:120]}"
+        for c in state["retrieved_chunks"][:3]
+    )
 
-    prompt = f"""Analyse this customer message and detect ALL intents present.
-A message can have multiple intents (e.g. asking a price question AND requesting a booking).
+    tools_list = "\n".join(
+        f"  {name}: {desc}"
+        for name, (_, desc) in TOOLS.items()
+    )
 
+    prompt = f"""You are the analysis engine for a customer service AI agent for "{state['business_name']}".
+Analyze the customer message and return a SINGLE JSON object with three keys.
+
+Customer query: "{query}"
 Conversation history:
 {history_snippet or 'None'}
-
 Active flow: {conv_state.get('active_flow', 'none')}
-Pending information needed: {json.dumps(conv_state.get('pending_slots', {}))}
+Pending slots: {json.dumps(conv_state.get('pending_slots', {}))}
+Customer tier: {customer_tier}
+Retrieved knowledge summary:
+{pdf_context or 'None'}
 
-Customer message: "{query}"
+Available tools:
+{tools_list}
 
-Possible intents:
-- order_item: wants to add/order a product or service
-- remove_item: wants to remove or change an item in their order
-- view_cart: wants to see current order
-- confirm_order: wants to confirm/finalize order
-- book_appointment: wants to schedule an appointment
-- reschedule: wants to change appointment time
-- cancel_booking: wants to cancel
-- check_availability: asks about available times
-- ask_pricing: asks about prices
-- ask_hours: asks about business hours
-- ask_info: general information question
-- provide_address: giving a delivery address
-- set_delivery: specifying pickup or delivery
-- complaint: has an issue or dispute
-- greeting: just saying hello
-- provide_missing_info: answering a previous question from the agent
-- ask_recommendations: wants suggestions
-- loyalty_question: asks about points/rewards
-- goodbye: ending conversation
+Return ONLY this JSON (no markdown):
+{{
+  "intents": ["order_item", "ask_pricing"],
+  "plan": "1. Add item to cart. 2. Confirm delivery preference.",
+  "tools": ["add_to_cart", "get_pricing"]
+}}
 
-Return ONLY a JSON array of detected intents: ["order_item", "ask_pricing"]
-No markdown, just JSON."""
+Rules:
+- intents: list from [order_item, remove_item, view_cart, confirm_order, book_appointment,
+  reschedule, cancel_booking, check_availability, ask_pricing, ask_hours, ask_info,
+  provide_address, set_delivery, complaint, greeting, provide_missing_info,
+  ask_recommendations, loyalty_question, goodbye]
+- plan: concise bullet plan (max 3 bullets)
+- tools: ONLY tools actually needed. Empty array [] for greetings/simple info.
+- Do NOT activate tools unless clearly required by the query."""
 
-    raw = llm_call(prompt, temperature=0.1, max_tokens=200)
-    raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start != -1 and end > start:
-            intents = json.loads(raw[start:end])
-        else:
-            intents = ["ask_info"]
-    except (json.JSONDecodeError, TypeError):
+        raw = llm_call(prompt, temperature=0.0, max_tokens=400,
+                       conversation_id=state["conversation_id"])
+        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        result = json.loads(raw)
+        intents = result.get("intents", ["ask_info"])
+        plan = result.get("plan", "Address the customer query.")
+        activated = [t for t in result.get("tools", []) if t in TOOLS]
+    except Exception as e:
+        log_agent_event(state["conversation_id"], "analyze_error", {"error": str(e)})
         intents = ["ask_info"]
+        plan = "Address the customer query using available tools and knowledge."
+        activated = []
+
+    # Log tool routing decisions
+    for tool_name in TOOLS:
+        activated_flag = tool_name in activated
+        log_tool_call(
+            state["conversation_id"],
+            tool_name,
+            {"query": query, "intents": intents},
+            {"activated": activated_flag},
+            activated=activated_flag,
+        )
 
     log_agent_event(state["conversation_id"], "intent_detection", {"intents": intents})
-    return {**state, "detected_intents": intents}
+    log_agent_event(state["conversation_id"], "internal_planning", {"plan": plan})
+    log_agent_event(state["conversation_id"], "tool_routing", {"activated_tools": activated})
+
+    return {
+        **state,
+        "detected_intents": intents,
+        "internal_plan": plan,
+        "activated_tools": activated,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -223,84 +201,6 @@ def node_rag_retrieval(state: AgentState) -> AgentState:
         "customer_context": customer_ctx,
         "global_stats": global_stats,
     }
-
-
-# ─────────────────────────────────────────────
-# Node: route_tools  (custom BATCHED LLM router)
-# ─────────────────────────────────────────────
-
-def node_route_tools(state: AgentState) -> AgentState:
-    """
-    Custom LLM-based router — decides ALL tools in a SINGLE LLM call.
-    This is NOT LangChain's built-in router. It's a custom per-tool decision
-    made by the LLM, but batched into one prompt to conserve API quota.
-    """
-    query = state["query"]
-    topics = state["query_topics"]
-    intents = state.get("detected_intents", [])
-    history_snippet = "\n".join(
-        f"{m['role'].upper()}: {m['content']}" for m in state["history"][-4:]
-    )
-    customer_tier = state.get("customer_context", {}).get("loyalty_tier", "bronze")
-    conv_state = state.get("conversation_state", {})
-
-    tools_list = "\n".join(
-        f"{i+1}. {name}: {desc}"
-        for i, (name, (_, desc)) in enumerate(TOOLS.items())
-    )
-
-    prompt = f"""You are a routing engine for a customer service AI agent.
-You must decide which tools to activate for the customer's query.
-
-Customer query: "{query}"
-Detected intents: {intents}
-Query topics: {topics}
-Customer loyalty tier: {customer_tier}
-Active conversation flow: {conv_state.get('active_flow', 'none')}
-Recent conversation:
-{history_snippet or 'None'}
-
-Available tools (name: purpose):
-{tools_list}
-
-Instructions:
-- Review each tool carefully against the detected intents and the internal plan.
-- The internal plan is: {state.get('internal_plan', 'None')}
-- Select ONLY the tools that are directly needed to handle this specific query.
-- For multi-intent messages, activate tools for ALL intents.
-- Do NOT activate tools unless the query clearly requires their action.
-- Consider the conversation flow: if the customer is continuing a booking or order, activate relevant tools.
-- Return ONLY a JSON array of tool names to activate, e.g.: ["tool_a", "tool_b"]
-- If no tools are needed (e.g. simple greeting), return: []
-
-JSON array of tools to activate:"""
-
-    activated = []
-    try:
-        raw = llm_call(prompt, temperature=0.0, max_tokens=300).strip()
-        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        start = raw.find("[")
-        end = raw.rfind("]") + 1
-        if start != -1 and end > start:
-            tool_list = json.loads(raw[start:end])
-            activated = [t for t in tool_list if t in TOOLS]
-    except Exception as e:
-        log_agent_event(state["conversation_id"], "router_error", {"error": str(e)})
-        activated = []
-
-    # Log all tool decisions
-    for tool_name in TOOLS:
-        activated_flag = tool_name in activated
-        log_tool_call(
-            state["conversation_id"],
-            tool_name,
-            {"query": query, "topics": topics, "intents": intents},
-            {"activated": activated_flag},
-            activated=activated_flag,
-        )
-
-    log_agent_event(state["conversation_id"], "tool_routing", {"activated_tools": activated})
-    return {**state, "activated_tools": activated}
 
 
 # ─────────────────────────────────────────────
@@ -426,89 +326,70 @@ def node_build_response(state: AgentState) -> AgentState:
 
 def node_critic(state: AgentState) -> AgentState:
     """
-    The Critic validates: 'Did I follow the extracted PDF rules?'
-    If not confidence is low, it returns feedback for improvement.
+    Fast rule-based critic — no LLM call.
+    Validates the response against basic quality rules instantly.
+    Only regenerates if the response is clearly broken/empty.
     """
     response = state["response"]
     query = state["query"]
+    intents = state.get("detected_intents", [])
+    tool_results = state.get("tool_results", {})
 
-    # Get relevant PDF rules from retrieved chunks
-    pdf_rules = "\n".join(
-        f"- {c.get('text', '')[:200]}" for c in state["retrieved_chunks"][:5]
-    )
-    tool_results_summary = ", ".join(state["activated_tools"]) if state["activated_tools"] else "none"
+    issues = []
 
-    prompt = f"""You are a quality control critic for a customer service AI agent.
-Review the agent's response and check:
+    # Rule 1: Non-empty meaningful response
+    if not response or len(response.strip()) < 15:
+        issues.append("Response is too short or empty")
 
-1. Does it follow the business rules from the PDF knowledge base?
-2. Is it factually consistent with the tool results?
-3. Does it address ALL the customer's intents?
-4. Is it professional, empathetic, and complete?
-5. Does it ask for missing information when needed?
+    # Rule 2: If confirm_order ran and succeeded, response should mention confirmation
+    if "confirm_order" in tool_results:
+        res = tool_results["confirm_order"]
+        if res.get("success") and not any(
+            w in response.lower() for w in ["confirm", "order", "total", "✅", "placed"]
+        ):
+            issues.append("Order confirmed but response doesn't acknowledge it")
 
-Customer query: "{query}"
-Detected intents: {state.get('detected_intents', [])}
-Tools activated: {tool_results_summary}
+    # Rule 3: If add_to_cart ran and succeeded, response should acknowledge item
+    if "add_to_cart" in tool_results:
+        res = tool_results["add_to_cart"]
+        if res.get("success") and not any(
+            w in response.lower() for w in ["added", "cart", "order", "got it", "sure"]
+        ):
+            issues.append("Item added but response doesn't acknowledge")
 
-Business rules (from PDF):
-{pdf_rules or 'No specific rules retrieved.'}
+    # Rule 4: Response should not be a raw JSON dump (programming error)
+    if response.strip().startswith('{') and response.strip().endswith('}'):
+        issues.append("Response looks like raw JSON — not customer-facing")
 
-Agent response to review:
-"{response}"
-
-Return ONLY JSON:
-{{
-  "passed": true,
-  "score": 8,
-  "issues": [],
-  "suggested_fix": ""
-}}
-
-If score < 6, set passed=false and describe the issue.
-No markdown, just JSON."""
-
-    try:
-        raw = llm_call(prompt, temperature=0.1, max_tokens=300)
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        critic_result = json.loads(raw)
-    except (json.JSONDecodeError, Exception):
-        critic_result = {"passed": True, "score": 7, "issues": [], "suggested_fix": ""}
-
-    passed = critic_result.get("passed", True)
+    passed = len(issues) == 0
+    critic_result = {
+        "passed": passed,
+        "score": 9 if passed else 4,
+        "issues": issues,
+        "method": "rule_based",
+    }
     log_agent_event(state["conversation_id"], "critic_review", critic_result)
 
-    if not passed and critic_result.get("suggested_fix"):
-        # Regenerate response with critic feedback
-        fix_prompt = f"""The previous response had issues. Please fix it.
-
-Original response: "{response}"
-Issues: {critic_result.get('issues', [])}
-Suggested fix: {critic_result.get('suggested_fix', '')}
+    # Only do LLM regeneration for truly broken responses
+    if not passed and "Response is too short or empty" in issues:
+        try:
+            fix_prompt = f"""The agent response was empty or broken. Generate a proper response.
 
 Customer query: "{query}"
-Write a corrected response that addresses the issues. Be concise."""
+Tool results: {json.dumps({k: v.get('message', '') for k, v in tool_results.items()}, default=str)}
 
-        try:
-            fixed_response = llm_call(fix_prompt, temperature=0.4, max_tokens=600)
-            log_message(state["conversation_id"], "assistant_revised", fixed_response)
-            log_agent_event(state["conversation_id"], "critic_revision", {
-                "original_score": critic_result.get("score"),
-                "issues": critic_result.get("issues"),
-            })
-            return {
-                **state,
-                "response": fixed_response,
-                "critic_passed": True,
-                "critic_feedback": f"Revised (was score {critic_result.get('score', '?')})",
-            }
+Write a helpful, conversational response:"""
+            fixed = llm_call(fix_prompt, temperature=0.4, max_tokens=400)
+            log_message(state["conversation_id"], "assistant_revised", fixed)
+            log_agent_event(state["conversation_id"], "critic_revision", {"issues": issues})
+            return {**state, "response": fixed, "critic_passed": True, "critic_feedback": "Revised: was empty"}
         except Exception:
             pass
 
     return {
         **state,
         "critic_passed": passed,
-        "critic_feedback": json.dumps(critic_result.get("issues", [])),
+        "critic_feedback": json.dumps(issues),
     }
 
 
@@ -517,23 +398,30 @@ Write a corrected response that addresses the issues. Be concise."""
 # ─────────────────────────────────────────────
 
 def build_graph() -> StateGraph:
+    """
+    Optimised graph: 4 nodes instead of 7.
+
+    Old flow (7 nodes, 6+ LLM calls/turn):
+      receive_input → detect_intents → rag_retrieval → planner
+      → route_tools → execute_tools → build_response → critic
+
+    New flow (4 nodes, 3 LLM calls/turn):
+      receive_input → rag_retrieval → analyze(intents+plan+tools)
+      → execute_tools → build_response → critic(rule-based)
+    """
     graph = StateGraph(AgentState)
 
     graph.add_node("receive_input", node_receive_input)
-    graph.add_node("detect_intents", node_detect_intents)
-    graph.add_node("rag_retrieval", node_rag_retrieval)
-    graph.add_node("planner", node_planner)
-    graph.add_node("route_tools", node_route_tools)
+    graph.add_node("rag_retrieval", node_rag_retrieval)   # LLM call #1: topic extraction
+    graph.add_node("analyze", node_analyze)               # LLM call #2: intents+plan+tools
     graph.add_node("execute_tools", node_execute_tools)
-    graph.add_node("build_response", node_build_response)
-    graph.add_node("critic", node_critic)
+    graph.add_node("build_response", node_build_response) # LLM call #3: final response
+    graph.add_node("critic", node_critic)                 # rule-based: no LLM call
 
     graph.set_entry_point("receive_input")
-    graph.add_edge("receive_input", "detect_intents")
-    graph.add_edge("detect_intents", "rag_retrieval")
-    graph.add_edge("rag_retrieval", "planner")
-    graph.add_edge("planner", "route_tools")
-    graph.add_edge("route_tools", "execute_tools")
+    graph.add_edge("receive_input", "rag_retrieval")
+    graph.add_edge("rag_retrieval", "analyze")
+    graph.add_edge("analyze", "execute_tools")
     graph.add_edge("execute_tools", "build_response")
     graph.add_edge("build_response", "critic")
     graph.add_edge("critic", END)
