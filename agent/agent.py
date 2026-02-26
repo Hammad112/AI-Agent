@@ -368,8 +368,18 @@ def node_execute_tools(state: AgentState) -> AgentState:
                 conv_state["pending_slots"] = {}
         elif name == "validate_address":
             if result.get("success"):
-                conv_state["pending_slots"].pop("address", None)
+                conv_state.setdefault("pending_slots", {}).pop("address", None)
         conv_state["last_tool"] = name
+
+    # Heuristic for satisfying conversational requirements
+    q_lower = state["query"].lower()
+    satisfied = conv_state.setdefault("satisfied_requirements", [])
+    if any(x in q_lower for x in ["no allergy", "don't have allergy", "not allergic", "no dietary"]):
+        satisfied.append("allergies_checked")
+    if any(x in q_lower for x in ["myself", "only me", "just me"]):
+        satisfied.append("group_size_checked")
+    if any(x in q_lower for x in ["group", "party", "gathering", "people"]):
+        satisfied.append("group_size_checked")
 
     # Persist conversation state
     save_conversation_state(state["conversation_id"], conv_state)

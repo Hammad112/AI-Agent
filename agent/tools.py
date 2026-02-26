@@ -61,38 +61,45 @@ def add_to_cart(state: dict, **kwargs) -> dict:
 And these available services/items:
 {svc_list}
 
-Which service/item does the customer want? Also extract quantity and any modifiers/options.
-Return ONLY JSON: {{"service_id": 1, "quantity": 1, "modifiers": "large, extra cheese", "matched": true}}
-If no match: {{"matched": false, "message": "reason"}}
+Which services/items does the customer want? Extract ALL items, their quantities, and any modifiers/options.
+Return ONLY JSON: {{"items": [{{"service_id": 1, "quantity": 1, "modifiers": "large, extra cheese", "matched": true}}]}}
+If no items match: {{"items": [{{"matched": false, "message": "reason"}}]}}
 No markdown, just JSON."""
 
-        raw = llm_call(match_prompt, temperature=0.1, max_tokens=200)
+        raw = llm_call(match_prompt, temperature=0.1, max_tokens=400)
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         try:
-            match = json.loads(raw)
+            match_data = json.loads(raw)
+            items_to_add = match_data.get("items", [])
         except json.JSONDecodeError:
-            match = {"matched": False, "message": "Could not parse service match."}
+            items_to_add = []
 
-        if not match.get("matched", False):
-            return {
-                "success": False,
-                "message": match.get("message", "I couldn't find that item. Could you be more specific?"),
-                "available_items": [dict(s) for s in services[:10]],
-            }
+        if not items_to_add:
+            return {"success": False, "message": "I couldn't identify any items to add. Could you be more specific?"}
 
-        svc_id = match.get("service_id")
-        quantity = max(1, int(match.get("quantity", 1)))
-        modifiers = match.get("modifiers", "")
+        added_log = []
+        for item in items_to_add:
+            if not item.get("matched", False):
+                continue
+            
+            svc_id = item.get("service_id")
+            quantity = max(1, int(item.get("quantity", 1)))
+            modifiers = item.get("modifiers", "")
 
-        svc = conn.execute("SELECT * FROM services WHERE id = ?", (svc_id,)).fetchone()
-        if not svc:
-            return {"success": False, "message": "Service not found."}
+            svc = conn.execute("SELECT * FROM services WHERE id = ?", (svc_id,)).fetchone()
+            if not svc:
+                continue
 
-        conn.execute(
-            "INSERT INTO cart (user_id, session_id, service_id, service_name, quantity, unit_price, modifiers, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (user_id, session_id, svc_id, svc["name"], quantity, svc["price"], modifiers, ""),
-        )
+            conn.execute(
+                "INSERT INTO cart (user_id, session_id, service_id, service_name, quantity, unit_price, modifiers, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, session_id, svc_id, svc["name"], quantity, svc["price"], modifiers, ""),
+            )
+            added_log.append(f"{quantity}x {svc['name']}")
+
         conn.commit()
+
+        if not added_log:
+             return {"success": False, "message": "I couldn't find those specific items in our menu."}
 
         # Get current cart summary
         cart_items = conn.execute(
@@ -103,16 +110,13 @@ No markdown, just JSON."""
 
         return {
             "success": True,
-            "added_item": svc["name"],
-            "quantity": quantity,
-            "modifiers": modifiers,
-            "unit_price": svc["price"],
+            "added_items": added_log,
             "cart_items": [
                 {"name": c["service_name"], "qty": c["quantity"], "price": c["unit_price"], "modifiers": c["modifiers"]}
                 for c in cart_items
             ],
             "cart_total": round(total, 2),
-            "message": f"Added {quantity}x {svc['name']} to your cart. Current total: ${total:.2f}",
+            "message": f"Added {', '.join(added_log)} to your cart. Current total: ${total:.2f}",
         }
     finally:
         conn.close()

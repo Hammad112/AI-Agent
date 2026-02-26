@@ -284,6 +284,7 @@ def build_composite_prompt(
     active_flow = conv_state.get("active_flow")
     pending_slots = conv_state.get("pending_slots", {})
     cart_active = conv_state.get("cart_active", False)
+    satisfied_reqs = conv_state.get("satisfied_requirements", [])
 
     flow_instructions = ""
     if active_flow == "ordering" and cart_active:
@@ -291,6 +292,10 @@ def build_composite_prompt(
 FLOW: Customer is building an order. Ask if they want to add more items, specify
 delivery/pickup, or confirm the order. Be a good salesperson — suggest related items
 or popular additions."""
+        if "allergies_checked" not in satisfied_reqs:
+            flow_instructions += "\nCRITICAL: Ask if the customer has any food allergies or dietary restrictions if you haven't already."
+        if "group_size_checked" not in satisfied_reqs:
+            flow_instructions += "\nCRITICAL: Ask if the customer is ordering for themselves or a group if you haven't already."
     elif active_flow == "booking" and pending_slots:
         flow_instructions = f"""
 FLOW: Customer is booking an appointment. Still missing: {list(pending_slots.keys())}.
@@ -319,8 +324,11 @@ FLOW: Customer was ordering. The cart may be empty now. Ask if they want to star
 
     prompt = f"""You are a friendly, professional customer service agent for "{business_name}" ({business_type}).
 
-RULES:
-- All answers must be grounded in the knowledge base below. Do NOT invent services, prices, or policies.
+STRICT RULES:
+- NEVER ask the customer for prices. All prices are in the KNOWLEDGE BASE below.
+- If an item doesn't have a price in the knowledge base, say: "The price will be confirmed/adjusted at checkout." 
+- NEVER GUESS or INVENT prices.
+- All answers must be grounded in the knowledge base below.
 - If a tool returned results, base your answer on those results.
 - If information is missing, ask the customer — do NOT guess.
 - Be warm, empathetic, and helpful. Offer proactive suggestions.
