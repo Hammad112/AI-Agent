@@ -152,3 +152,16 @@ CREATE TABLE IF NOT EXISTS conversation_state (
     state_json      TEXT NOT NULL,
     updated_at      TEXT DEFAULT (datetime('now'))
 );
+
+-- Customer complaints / dispute log
+CREATE TABLE IF NOT EXISTS complaints (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER REFERENCES users(id),
+    order_id            INTEGER REFERENCES orders(id),
+    conversation_id     TEXT,
+    complaint_type      TEXT,
+    description         TEXT,
+    suggested_resolution TEXT,
+    status              TEXT    DEFAULT 'open',
+    created_at          TEXT    DEFAULT (datetime('now'))
+);
