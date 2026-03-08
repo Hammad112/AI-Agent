@@ -274,12 +274,19 @@ def load_conversation_state(conversation_id: str) -> dict | None:
 
 # ── Synthetic data generation ──────────────
 
-def generate_synthetic_data(business_type: str, business_name: str) -> None:
+def generate_synthetic_data(business_type: str, business_name: str, chunks: list[dict] = None) -> None:
     if _already_seeded(business_name):
         return
 
+    context_text = ""
+    if chunks:
+        # Use first few chunks that likely contain services/pricing
+        context_text = "\n".join(c.get("text", "")[:500] for c in chunks[:10])
+
     prompt = f"""
 You are a database seeder. The business is: "{business_name}" ({business_type}).
+Here is some context about the business from its documentation:
+{context_text}
 
 Return ONLY a JSON object with these keys:
 {{

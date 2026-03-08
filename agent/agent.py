@@ -140,8 +140,33 @@ Rules:
   ask_recommendations, loyalty_question, goodbye]
 - plan: concise bullet plan (max 3 bullets)
 - tools: ONLY tools actually needed. Empty array [] for greetings/simple info.
-- If the customer asked multiple questions (e.g. price AND booking), ensure you activate ALL relevant intents and tools.
-- Do NOT activate tools unless clearly required by the query."""
+- AFFIRMATIVE RESPONSES: If the customer says "yes", "confirm", "do it", or "go ahead" after you suggested an item or service, ALWAYS activate the relevant tool (add_to_cart, book_appointment, or confirm_order).
+- PICKUP/DELIVERY/BOOKING/INFO: If the customer provides a date, time, or missing details (like a provider name or service choice) for a pending booking/order, ALWAYS activate the relevant tool (e.g., `book_appointment`) to process and verify the information.
+- Do NOT activate tools unless clearly required by the query.
+- Multiple intents: Activate ALL relevant tools (e.g. view_cart AND add_to_cart if they ask to see the cart after adding)."""
+
+    # HEURISTIC: Aggressive activation for certain inputs to ensure reliability
+    q_lower = query.lower().strip().strip("!.?")
+    is_affirmative = q_lower in ["yes", "yeah", "yup", "sure", "ok", "okay", "confirm", "do it", "go ahead"]
+    has_date_spec = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', query)) or any(w in q_lower for w in ["tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "pickup", "delivery"])
+    has_payment_conf = any(w in q_lower for w in ["paid", "deposit", "deposite", "payment", "processed"])
+
+    forced_tools = []
+    if is_affirmative or has_payment_conf:
+        last_assistant = next((m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"), "")
+        # If discussing ordering/payment, confirm the order
+        if any(w in last_assistant for w in ["order", "cart", "total", "pay", "checkout", "deposit"]):
+            forced_tools.append("confirm_order")
+        # If discussing booking, ensure book_appointment is called to finalize
+        if any(w in last_assistant for w in ["book", "appointment", "schedule", "date", "time", "visit"]):
+            forced_tools.append("book_appointment")
+        
+        # Original affirmative cart inclusion
+        if any(w in last_assistant for w in ["like to add", "interested in", "would you like", "suggest", "hemming", "suit", "zipper", "replace"]):
+            forced_tools.append("add_to_cart")
+
+    if has_date_spec:
+        forced_tools.append("book_appointment")
 
     try:
         raw = llm_call(prompt, temperature=0.0, max_tokens=400,
@@ -150,9 +175,36 @@ Rules:
         result = json.loads(raw)
         intents = result.get("intents", ["ask_info"])
         plan = result.get("plan", "Address the customer query.")
+        
         # FIX: Ensure unique tool activation to prevent duplicate calls causing pricing errors
         raw_activated = [t for t in result.get("tools", []) if t in TOOLS]
+        raw_activated.extend(forced_tools)
         activated = list(dict.fromkeys(raw_activated))
+
+        # STRICT GUARDRAIL: Prevent premature confirmation/booking
+        # If the LLM tries to confirm/book, but the user didn't explicitly say "yes/confirm" 
+        # to a direct confirmation question, block it.
+        # EXCEPTION: If forced_tools already added them (meaning we detected a strong affirmative), let it pass.
+        if ("confirm_order" in activated and "confirm_order" not in forced_tools) or \
+           ("book_appointment" in activated and "book_appointment" not in forced_tools):
+            
+            # Did the agent ask for confirmation last turn?
+            last_assistant_msg = next((m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"), "")
+            asked_for_confirmation = any(phrase in last_assistant_msg for phrase in [
+                "would you like to proceed", "say yes or no", "shall i book", "confirm this", "ready to order"
+            ])
+            
+            # Did the user say yes?
+            if not (is_affirmative and asked_for_confirmation):
+                # The user is probably just answering a combo question like "no allergies"
+                if "confirm_order" in activated:
+                    activated.remove("confirm_order")
+                if "book_appointment" in activated:
+                    activated.remove("book_appointment")
+                
+                # Add a note to the plan so the agent knows it was blocked
+                plan += " (Note: Confirmation blocked until explicit 'yes' from customer)"
+                
     except Exception as e:
         log_agent_event(state["conversation_id"], "analyze_error", {"error": str(e)})
         intents = ["ask_info"]
@@ -313,6 +365,10 @@ def node_build_response(state: AgentState) -> AgentState:
         detected_intents=state.get("detected_intents", []),
         conversation_state=conv_state,
     )
+
+    # REINFORCEMENT: Strictly forbid hallucinating reference numbers and enforce formatting
+    composite_prompt += "\n\nCRITICAL: NEVER invent or hallucinate ORDER-XXX, APPT-XXX, or REF-XXX numbers. ONLY use reference numbers explicitly provided in the SUCCESSFUL TOOL RESULTS above."
+    composite_prompt += "\n\nREINFORCEMENT: IFF (and ONLY if) a booking was just successfully confirmed (success: true) with a real reference number, you MUST output the beautifully formatted bulleted list. If the tool failed or was not called, DO NOT show the list; instead, address the tool's error message or ask for missing info."
 
     response = llm_call(composite_prompt, temperature=0.5, max_tokens=800)
     

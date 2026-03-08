@@ -309,10 +309,13 @@ def build_composite_prompt(
 FLOW: Customer is building an order. Ask if they want to add more items, specify
 delivery/pickup, or confirm the order. Be a good salesperson — suggest related items
 or popular additions."""
-        if "allergies_checked" not in satisfied_reqs:
-            flow_instructions += "\nCRITICAL: Ask if the customer has any food allergies or dietary restrictions if you haven't already."
-        if "group_size_checked" not in satisfied_reqs:
-            flow_instructions += "\nCRITICAL: Ask if the customer is ordering for themselves or a group if you haven't already."
+        
+        is_food_biz = any(bt in (business_type or "").lower() for bt in ["restaurant", "pizzeria", "food", "cafe", "bakery", "deli"])
+        if is_food_biz:
+            if "allergies_checked" not in satisfied_reqs:
+                flow_instructions += "\nCRITICAL: Ask if the customer has any food allergies or dietary restrictions if you haven't already."
+            if "group_size_checked" not in satisfied_reqs:
+                flow_instructions += "\nCRITICAL: Ask if the customer is ordering for themselves or a group if you haven't already."
     elif active_flow == "booking" and pending_slots:
         flow_instructions = f"""
 FLOW: Customer is booking an appointment. Still missing: {list(pending_slots.keys())}.
@@ -365,10 +368,11 @@ STRICT RULES:
 - SERVICE NAMES: NEVER use internal IDs like "Service 4". ALWAYS use the natural service name provided in tool results or context.
 - PRICING GAPS: If price is missing or "$0.00", explicitly say "Please call us for current pricing" or "Contact us for a quote". 
 - NATURAL UPSELL: Suggest ONE relevant item per session only if it adds real value (e.g. "Since you're getting a pizza, would you like a drink?"). DO NOT repeat upsells.
-- CONFIRMATION: Always include Order/Booking/Complaint Reference numbers (e.g., ORDER-123, APPT-456, REF-789) provided by the tools.
-- ADDRESSES: Acknowledge the street and city when confirming delivery.
-- COMPLAINTS: Acknowledge grievances warmly, confirm they are logged, and provide a reference number (REF-123).
 - LOYALTY: Mention point balance and tier if relevant to the turn.
+- PICKUP/DELIVERY DATES: If the customer provides a date/time for pickup, you MUST confirm it as an appointment before acknowledging it as "set".
+- BOOKING CONFIRMATION FORMAT: IFF (and ONLY if) a booking or order is successfully confirmed in the TOOL RESULTS (e.g., success: true with a real reference number), you MUST present the details beautifully in a bulleted list: Service Name, Date & Time, Provider, Duration, Price, and Reference Number. 
+- FAILURE HANDLING: If a tool returns success: false, you MUST explain the issue to the customer using the provided "message" and ask for the missing information. DO NOT show the bulleted confirmation list if the tool failed or wasn't called.
+- CART ITEMS: Do NOT confirm an order unless you have items in the cart. If the cart is empty, ask them what they'd like to order first.
 - GROUNDING: NEVER GUESS or INVENT prices. If information is missing, ask the customer — do NOT guess.
 - Address ALL detected intents: {detected_intents or ['general']}
 {flow_instructions}{fav_instruction}{family_instruction}

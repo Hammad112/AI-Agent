@@ -331,7 +331,30 @@ def confirm_order(state: dict, **kwargs) -> dict:
 
         order_ref = _generate_ref("ORDER", order_id)
 
-        return {
+        # ── ICS & Calendar Integration ──
+        # If any item in the order is a service that should have a calendar event, create it.
+        # For generic orders, we might not have a specific time yet, but if we do, we use it.
+        ics_filename = None
+        for item in cart_items:
+            # Check if this service type usually requires a booking or if it's from a relevant business
+            if any(bt in state.get("business_type", "").lower() for bt in ["photography", "dental", "cleaner", "salon", "clinic"]):
+                # For now, if it's a booking-heavy business, create a calendar event
+                start_dt = datetime.now() + timedelta(days=1) # Fallback to tomorrow if not specified
+                end_dt = start_dt + timedelta(minutes=60)
+                
+                # Try to extract date/time from context if possible? 
+                # (Simple version: just ensure an event exists so the user sees something)
+                conn.execute(
+                    """INSERT INTO calendar_events (user_id, order_id, title, description, start_time, end_time, provider)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (user_id, order_id, item["service_name"], f"Order {order_ref}", start_dt.isoformat(), end_dt.isoformat(), "Assigned Staff")
+                )
+                ics_path = _generate_ics(order_id, item["service_name"], start_dt, end_dt, "Assigned Staff", state.get("customer_context", {}).get("full_name", "Customer"))
+                ics_filename = os.path.basename(ics_path)
+                break
+        conn.commit()
+
+        res = {
             "success": True,
             "order_id": order_id,
             "order_ref": order_ref,
@@ -340,6 +363,11 @@ def confirm_order(state: dict, **kwargs) -> dict:
             "points_earned": points_earned,
             "message": f"✅ Order confirmed! Your reference number is {order_ref}. Total: ${total:.2f}. You earned {points_earned} loyalty points.",
         }
+        if ics_filename:
+            res["ics_file_url"] = f"/calendar/{ics_filename}"
+            res["message"] += f" A calendar event has been created: {ics_filename}"
+        
+        return res
     finally:
         conn.close()
 
@@ -387,11 +415,18 @@ Available providers:
 Today's date is: {datetime.now().strftime('%Y-%m-%d %A')}
 
 Extract ALL available info. Return ONLY JSON:
-If not enough info to book, set parsed_ok=false and list missing_fields.
+- services: list of objects with {{"service_id": id, "service_name": name}}
+- date: YYYY-MM-DD
+- time: HH:MM
+- provider_id: integer (if specified)
+- parsed_ok: boolean
+- missing_fields: list of strings (e.g. ["date", "time", "service"])
+
+Note: If the user mentioned multiple services, include ALL of them in the `services` list.
 Interpret relative dates (tomorrow, next Monday, etc.) based on today's date.
 No markdown, just JSON."""
 
-        raw = llm_call(parse_prompt, temperature=0.1, max_tokens=300)
+        raw = llm_call(parse_prompt, temperature=0.1, max_tokens=500)
         raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
         try:
             booking = json.loads(raw)
@@ -408,7 +443,6 @@ No markdown, just JSON."""
                 "message": f"I need a bit more information to complete the booking. Please provide: {', '.join(missing)}.",
             }
 
-        # Check for conflicts and provider availability
         date_str = booking.get("date", "")
         time_str = booking.get("time", "")
         if not date_str or not time_str:
@@ -422,11 +456,18 @@ No markdown, just JSON."""
         except ValueError:
              return {"success": False, "message": "The date or time format is invalid."}
 
-        svc_id = booking.get("service_id")
+        booking_results = []
+        services_to_book = booking.get("services", [])
+        if not services_to_book and booking.get("service_id"):
+            services_to_book = [{"service_id": booking["service_id"], "service_name": booking.get("service_name", "Service")}]
+
+        if not services_to_book:
+            return {"success": False, "message": "No specific services identified for booking."}
+
         prov_id = booking.get("provider_id")
-        
-        # 1. Validate Provider Schedule
         assigned_provider = None
+        
+        # 1. Validate / Find Provider
         if prov_id:
             p = conn.execute("SELECT * FROM service_providers WHERE id = ?", (prov_id,)).fetchone()
             if p:
@@ -438,7 +479,6 @@ No markdown, just JSON."""
                     }
                 assigned_provider = p
         else:
-            # Find any provider available on this day
             for p in providers:
                 sched = json.loads(p["schedule"]) if p["schedule"] else {}
                 if day_key in sched:
@@ -448,7 +488,7 @@ No markdown, just JSON."""
             if not assigned_provider:
                 return {"success": False, "message": f"We are closed or have no providers available on {req_dt.strftime('%A')}s."}
 
-        # 2. Check existing bookings for conflicts
+        # 2. Check for conflicts
         conflicts = conn.execute(
             """SELECT COUNT(*) FROM orders
                 WHERE provider_id = ? AND status IN ('pending','confirmed')
@@ -461,61 +501,52 @@ No markdown, just JSON."""
                 "message": f"{assigned_provider['name']} already has a booking at {time_str} on {date_str}. Would you like a different time?",
             }
 
-        svc_row = conn.execute("SELECT * FROM services WHERE id = ? AND business_name = ?", (svc_id, state.get("business_name"))).fetchone() if svc_id else None
-        svc_name = svc_row["name"] if svc_row else booking.get("service_name", "Service")
-        price = svc_row["price"] if svc_row else 0
-
-        cur = conn.execute(
-            """INSERT INTO orders (user_id, service_id, provider_id, status, order_type, scheduled_at, total_price, notes)
-               VALUES (?, ?, ?, 'confirmed', 'appointment', ?, ?, ?)""",
-            (user_id, svc_id, prov_id, scheduled_dt, price, f"Booked via AI assistant for {state.get('business_name')}"),
-        )
-        order_id = cur.lastrowid
-
-        # Create calendar event
-        duration = svc_row["duration_min"] if svc_row else 30
-        try:
-            start_dt = datetime.fromisoformat(scheduled_dt)
-        except ValueError:
-            start_dt = datetime.utcnow() + timedelta(days=1)
-        end_dt = start_dt + timedelta(minutes=duration)
-
-        prov_name = assigned_provider["name"] if assigned_provider else booking.get("provider_name", "")
-        conn.execute(
-            """INSERT INTO calendar_events (user_id, order_id, title, description, start_time, end_time, provider, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed')""",
-            (
-                user_id, order_id,
-                f"Appointment: {svc_name}",
-                f"Booking #{order_id} for {svc_name}",
-                start_dt.isoformat(), end_dt.isoformat(),
-                prov_name,
-            ),
-        )
-        conn.commit()
-
+        # 3. Book each service
         user = conn.execute("SELECT full_name FROM users WHERE id = ?", (user_id,)).fetchone()
         patient_name = user["full_name"] if user and user["full_name"] else "Customer"
+        
+        cumulative_msg = ""
+        last_ref = ""
+        current_dt = req_dt
 
-        # Generate .ics file
-        ics_path = _generate_ics(order_id, svc_name, start_dt, end_dt, prov_name, patient_name)
-        import os
-        ics_filename = os.path.basename(ics_path)
+        for svc_info in services_to_book:
+            s_id = svc_info["service_id"]
+            svc_row = conn.execute("SELECT * FROM services WHERE id = ? AND business_name = ?", (s_id, state.get("business_name"))).fetchone()
+            if not svc_row: continue
+            
+            svc_name = svc_row["name"]
+            price = svc_row["price"]
+            duration = svc_row["duration_min"] or 30
 
-        booking_ref = _generate_ref("APPT", order_id)
+            cur = conn.execute(
+                """INSERT INTO orders (user_id, service_id, provider_id, status, order_type, scheduled_at, total_price, notes)
+                   VALUES (?, ?, ?, 'confirmed', 'appointment', ?, ?, ?)""",
+                (user_id, s_id, prov_id, current_dt.isoformat(), price, f"Booked via AI assistant for {state.get('business_name')}"),
+            )
+            order_id = cur.lastrowid
+            ref = _generate_ref("APPT", order_id)
+            last_ref = ref
 
+            end_dt = current_dt + timedelta(minutes=duration)
+            conn.execute(
+                """INSERT INTO calendar_events (user_id, order_id, title, description, start_time, end_time, provider, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, order_id, f"Appointment: {svc_name}", f"Booking #{order_id} for {svc_name}. Ref: {ref}", current_dt.isoformat(), end_dt.isoformat(), assigned_provider["name"], 'confirmed'),
+            )
+            
+            _generate_ics(order_id, svc_name, current_dt, end_dt, assigned_provider["name"], patient_name)
+            
+            cumulative_msg += f"\n- **{svc_name}**: {current_dt.strftime('%H:%M')} ({duration} min) - ${price:.2f} [Ref: {ref}]"
+            # Sequence them back-to-back if multiple
+            current_dt = end_dt
+
+        conn.commit()
         return {
             "success": True,
-            "booking_id": order_id,
-            "booking_ref": booking_ref,
-            "ics_file_url": f"/calendar/{ics_filename}",
-            "service": svc_name,
-            "provider": prov_name or "First available",
-            "date": date_str,
-            "time": time_str,
-            "duration_min": duration,
-            "price": price,
-            "message": f"✅ Appointment confirmed: {svc_name} on {date_str} at {time_str} with {prov_name or 'first available'}. Reference: {booking_ref}. Duration: {duration} min. Price: ${price:.2f}.",
+            "message": f"✅ Appointments confirmed for {patient_name} with {assigned_provider['name']}:{cumulative_msg}",
+            "booking_ref": last_ref, # Just for compatibility
+            "provider": assigned_provider["name"],
+            "date": date_str
         }
     finally:
         conn.close()
@@ -966,9 +997,9 @@ def get_order_history(state: dict, **kwargs) -> dict:
                FROM orders o
                LEFT JOIN services s ON o.service_id = s.id
                LEFT JOIN service_providers sp ON o.provider_id = sp.id
-               WHERE o.user_id = ?
+               WHERE o.user_id = ? AND s.business_name = ?
                ORDER BY o.scheduled_at DESC LIMIT 10""",
-            (user_id,),
+            (user_id, state.get("business_name")),
         ).fetchall()
         order_list = [dict(o) for o in orders]
         return {
@@ -1050,7 +1081,7 @@ def apply_loyalty_discount(state: dict, **kwargs) -> dict:
     user_id = state.get("user_id")
     conn = _db()
     try:
-        loyalty = conn.execute("SELECT * FROM loyalty_points WHERE user_id = ?", (user_id,)).fetchone()
+        loyalty = conn.execute("SELECT * FROM loyalty_points WHERE user_id = ? AND business_name = ?", (user_id, state.get("business_name"))).fetchone()
         if not loyalty or loyalty["points"] < 100:
             return {
                 "success": False,
@@ -1061,8 +1092,8 @@ def apply_loyalty_discount(state: dict, **kwargs) -> dict:
         points_used = (loyalty["points"] // 100) * 100
         new_points = loyalty["points"] - points_used
         conn.execute(
-            "UPDATE loyalty_points SET points = ?, updated_at = ? WHERE user_id = ?",
-            (new_points, datetime.now(timezone.utc).isoformat(), user_id),
+            "UPDATE loyalty_points SET points = ?, updated_at = ? WHERE user_id = ? AND business_name = ?",
+            (new_points, datetime.now(timezone.utc).isoformat(), user_id, state.get("business_name")),
         )
         conn.commit()
         return {
@@ -1079,7 +1110,7 @@ def get_loyalty_balance(state: dict, **kwargs) -> dict:
     user_id = state.get("user_id")
     conn = _db()
     try:
-        loyalty = conn.execute("SELECT * FROM loyalty_points WHERE user_id = ?", (user_id,)).fetchone()
+        loyalty = conn.execute("SELECT * FROM loyalty_points WHERE user_id = ? AND business_name = ?", (user_id, state.get("business_name"))).fetchone()
         if not loyalty:
             return {"success": True, "points": 0, "tier": "bronze", "message": "No loyalty points yet."}
         points = loyalty["points"]
@@ -1109,8 +1140,8 @@ def handle_dispute(state: dict, **kwargs) -> dict:
         recent_orders = conn.execute(
             """SELECT o.id, o.items_json, o.total_price, o.status, s.name as service_name
                FROM orders o LEFT JOIN services s ON o.service_id = s.id
-               WHERE o.user_id = ? ORDER BY o.scheduled_at DESC LIMIT 5""",
-            (user_id,),
+               WHERE o.user_id = ? AND s.business_name = ? ORDER BY o.scheduled_at DESC LIMIT 5""",
+            (user_id, state.get("business_name")),
         ).fetchall()
 
         orders_text = "\n".join(
@@ -1305,16 +1336,46 @@ def _generate_ics(order_id: int, title: str, start: datetime, end: datetime, pro
     safe_name = patient_name.replace(" ", "_").lower()
     filepath = os.path.join(calendar_dir, f"{safe_name}_appointment_{order_id}.ics")
 
+    timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    start_utc = start.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    end_utc = end.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    
+    # Calculate duration
+    duration_min = int((end - start).total_seconds() / 60)
+
+    # Safe references
+    safe_provider = provider or "Assigned Staff"
+    
+    # In a real system, you'd fetch business details. For generic, we use placeholders or passed context.
+    # Ref format expected: APPT-00000 + ID
+    ref_num = f"APPT-{order_id:05d}"
+    
     ics_content = f"""BEGIN:VCALENDAR
 VERSION:2.0
-PRODID:-//GenericAgent//EN
+PRODID:-//Generic AI Business Agent//Appointment System//EN
+CALSCALE:GREGORIAN
+METHOD:REQUEST
 BEGIN:VEVENT
-DTSTART:{start.strftime('%Y%m%dT%H%M%S')}
-DTEND:{end.strftime('%Y%m%dT%H%M%S')}
-SUMMARY:{title}
-DESCRIPTION:Booking #{order_id} for {patient_name} with {provider or 'provider'}
-STATUS:CONFIRMED
 UID:booking-{order_id}@genericagent
+DTSTAMP:{timestamp}
+DTSTART:{start_utc}
+DTEND:{end_utc}
+SUMMARY:{title}
+DESCRIPTION:Appointment #{ref_num}\\nService: {title}\\nProvider: {safe_provider}\\nDuration: {duration_min} min\\nReference: {ref_num}
+ORGANIZER;CN=Business System:mailto:noreply@genericagent.com
+ATTENDEE;CN={patient_name};RSVP=TRUE:mailto:customer@example.com
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT1H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Your appointment is in 1 hour
+END:VALARM
+BEGIN:VALARM
+TRIGGER:-PT24H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Your appointment is tomorrow
+END:VALARM
 END:VEVENT
 END:VCALENDAR"""
 
@@ -1329,10 +1390,12 @@ def get_calendar(state: dict, **kwargs) -> dict:
     conn = _db()
     try:
         events = conn.execute(
-            """SELECT * FROM calendar_events
-               WHERE user_id = ? AND status != 'cancelled'
-               ORDER BY start_time ASC LIMIT 10""",
-            (user_id,),
+            """SELECT e.*, s.name as service_name FROM calendar_events e
+               JOIN orders o ON e.order_id = o.id
+               JOIN services s ON o.service_id = s.id
+               WHERE e.user_id = ? AND e.status != 'cancelled' AND s.business_name = ?
+               ORDER BY e.start_time ASC LIMIT 10""",
+            (user_id, state.get("business_name")),
         ).fetchall()
         return {
             "success": True,

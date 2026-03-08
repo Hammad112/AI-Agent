@@ -92,7 +92,7 @@ def startup(file_path: str) -> tuple[str, str, list[dict]]:
 
         # 5. Synthetic data
         with console.status("[bold]Generating synthetic data..."):
-            generate_synthetic_data(business_type, business_name)
+            generate_synthetic_data(business_type, business_name, all_chunks)
         console.print("  → Synthetic data [green]generated[/]")
 
         # Store business hours if provided
