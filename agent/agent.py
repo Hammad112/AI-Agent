@@ -40,6 +40,58 @@ from agent.tools import TOOLS
 
 
 # ─────────────────────────────────────────────
+# Business Mode Helper
+# ─────────────────────────────────────────────
+
+def _get_business_mode(business_type: str) -> str:
+    """
+    Returns the operating mode of the business so the router knows
+    which tool families are valid.
+
+    "appointment" — book_appointment / reschedule / cancel / check_availability
+    "ordering"    — add_to_cart / confirm_order / delivery / address
+    "both"        — dry cleaners, photography studios, etc.
+
+    This prevents pizza shops triggering book_appointment and dental
+    clinics triggering confirm_order / set_delivery_type.
+    """
+    bt = (business_type or "").lower()
+
+    APPOINTMENT_KEYWORDS = [
+        "dental", "dentist", "clinic", "doctor", "medical", "health",
+        "salon", "beauty", "spa", "massage", "therapy", "therapist",
+        "physiotherapy", "physio", "chiropractor", "optometry", "optometrist",
+        "veterinary", "vet", "lawyer", "legal", "accountant", "accounting",
+        "gym", "fitness", "yoga", "pilates", "barber", "barbershop",
+        "dermatology", "skin", "nail", "lash", "tattoo", "piercing",
+        "photography", "photographer", "studio",
+    ]
+    ORDERING_KEYWORDS = [
+        "restaurant", "pizzeria", "pizza", "food", "cafe", "coffee",
+        "bakery", "deli", "diner", "takeout", "takeaway", "fast food",
+        "grocery", "catering", "delivery", "burger", "sushi",
+    ]
+    BOTH_KEYWORDS = [
+        "dry clean", "laundry", "cleaner", "alterations", "tailor",
+        "florist", "flower", "car wash", "auto", "garage", "mechanic",
+        "library",
+    ]
+
+    is_appt  = any(k in bt for k in APPOINTMENT_KEYWORDS)
+    is_order = any(k in bt for k in ORDERING_KEYWORDS)
+    is_both  = any(k in bt for k in BOTH_KEYWORDS)
+
+    if is_both:
+        return "both"
+    if is_appt and not is_order:
+        return "appointment"
+    if is_order and not is_appt:
+        return "ordering"
+    # Unknown / ambiguous → allow everything so nothing breaks
+    return "both"
+
+
+# ─────────────────────────────────────────────
 # State Schema
 # ─────────────────────────────────────────────
 
@@ -111,8 +163,27 @@ def node_analyze(state: AgentState) -> AgentState:
         for name, (_, desc) in TOOLS.items()
     )
 
+    # ── Business mode: controls which tool families are valid ───────────────
+    biz_mode = _get_business_mode(state.get("business_type", ""))
+    # appointment-only tools (never fire for pure ordering businesses)
+    APPT_TOOLS  = {"book_appointment", "reschedule_booking", "cancel_booking", "check_availability"}
+    # ordering-only tools (never fire for pure appointment businesses)
+    ORDER_TOOLS = {"add_to_cart", "remove_from_cart", "view_cart", "confirm_order",
+                   "set_delivery_type", "validate_address"}
+
+    def _mode_allowed(tool_name: str) -> bool:
+        if biz_mode == "appointment" and tool_name in ORDER_TOOLS:
+            return False
+        if biz_mode == "ordering" and tool_name in APPT_TOOLS:
+            return False
+        return True
+
     prompt = f"""You are the analysis engine for a customer service AI agent for "{state['business_name']}".
 Analyze the customer message and return a SINGLE JSON object with three keys.
+
+Business mode: {biz_mode.upper()}
+{"→ APPOINTMENT-ONLY business. NEVER use: add_to_cart, confirm_order, set_delivery_type, validate_address." if biz_mode == "appointment" else ""}
+{"→ ORDERING-ONLY business (restaurant/pizza). NEVER use: book_appointment, reschedule_booking, cancel_booking, check_availability." if biz_mode == "ordering" else ""}
 
 Customer query: "{query}"
 Conversation history:
@@ -140,33 +211,69 @@ Rules:
   ask_recommendations, loyalty_question, goodbye]
 - plan: concise bullet plan (max 3 bullets)
 - tools: ONLY tools actually needed. Empty array [] for greetings/simple info.
+- RESPECT BUSINESS MODE: never suggest tools outside the allowed set for this business type.
 - AFFIRMATIVE RESPONSES: If the customer says "yes", "confirm", "do it", or "go ahead" after you suggested an item or service, ALWAYS activate the relevant tool (add_to_cart, book_appointment, or confirm_order).
-- PICKUP/DELIVERY/BOOKING/INFO: If the customer provides a date, time, or missing details (like a provider name or service choice) for a pending booking/order, ALWAYS activate the relevant tool (e.g., `book_appointment`) to process and verify the information.
 - Do NOT activate tools unless clearly required by the query.
-- Multiple intents: Activate ALL relevant tools (e.g. view_cart AND add_to_cart if they ask to see the cart after adding)."""
+- Multiple intents: Activate ALL relevant tools."""
 
-    # HEURISTIC: Aggressive activation for certain inputs to ensure reliability
+    # ── Keyword heuristics ────────────────────────────────────────────────
     q_lower = query.lower().strip().strip("!.?")
     is_affirmative = q_lower in ["yes", "yeah", "yup", "sure", "ok", "okay", "confirm", "do it", "go ahead"]
-    has_date_spec = bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', query)) or any(w in q_lower for w in ["tomorrow", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday", "pickup", "delivery"])
-    has_payment_conf = any(w in q_lower for w in ["paid", "deposit", "deposite", "payment", "processed"])
+    has_date_spec  = (
+        bool(re.search(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}', query))
+        or any(w in q_lower for w in [
+            "tomorrow", "monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday",
+        ])
+    )
+    # "pickup" / "delivery" are ORDER-domain words, not appointment triggers
+    has_pickup_delivery = any(w in q_lower for w in ["pickup", "delivery", "deliver"])
+    has_payment_conf    = any(w in q_lower for w in ["paid", "deposit", "deposite", "payment", "processed"])
 
-    forced_tools = []
+    forced_tools: list[str] = []
     if is_affirmative or has_payment_conf:
-        last_assistant = next((m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"), "")
-        # If discussing ordering/payment, confirm the order
-        if any(w in last_assistant for w in ["order", "cart", "total", "pay", "checkout", "deposit"]):
-            forced_tools.append("confirm_order")
-        # If discussing booking, ensure book_appointment is called to finalize
-        if any(w in last_assistant for w in ["book", "appointment", "schedule", "date", "time", "visit"]):
-            forced_tools.append("book_appointment")
-        
-        # Original affirmative cart inclusion
-        if any(w in last_assistant for w in ["like to add", "interested in", "would you like", "suggest", "hemming", "suit", "zipper", "replace"]):
+        last_assistant = next(
+            (m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"),
+            "",
+        )
+
+        # ── KEY FIX: choose ONE confirmation tool based on business mode ──
+        # Previously BOTH confirm_order and book_appointment were added when
+        # the last message contained words like "appointment" AND "total",
+        # causing two DB records to be created in the same turn.
+        if biz_mode == "appointment":
+            # Appointment business: "yes" always means finalise booking
+            if any(w in last_assistant for w in ["book", "appointment", "schedule", "slot", "date", "time", "visit"]):
+                forced_tools.append("book_appointment")
+        elif biz_mode == "ordering":
+            # Ordering business: "yes" always means place the order
+            if any(w in last_assistant for w in ["order", "cart", "total", "pay", "checkout", "deposit"]):
+                forced_tools.append("confirm_order")
+        else:
+            # "both" mode (dry cleaner, etc.) — pick by signal priority:
+            # booking keywords beat cart keywords so appointments aren't lost
+            last_has_appt  = any(w in last_assistant for w in ["appointment", "schedule", "slot", "visit", "book"])
+            last_has_order = any(w in last_assistant for w in ["cart", "total", "pay", "checkout", "order"])
+            if last_has_appt:
+                forced_tools.append("book_appointment")
+            elif last_has_order:
+                forced_tools.append("confirm_order")
+
+        # Upsell affirmative (add_to_cart) — only for ordering/both
+        if biz_mode != "appointment" and any(
+            w in last_assistant for w in
+            ["like to add", "interested in", "would you like", "suggest", "hemming", "suit", "zipper", "replace"]
+        ):
             forced_tools.append("add_to_cart")
 
-    if has_date_spec:
-        forced_tools.append("book_appointment")
+    # Date spec triggers book_appointment ONLY for appointment/both businesses,
+    # and ONLY when a booking flow is active (not for pizza delivery dates)
+    if has_date_spec and not has_pickup_delivery and biz_mode != "ordering":
+        conv_state = state.get("conversation_state", {})
+        if conv_state.get("active_flow") == "booking" or any(
+            w in query.lower() for w in ["appointment", "book", "schedule", "see the", "visit"]
+        ):
+            forced_tools.append("book_appointment")
 
     try:
         raw = llm_call(prompt, temperature=0.0, max_tokens=400,
@@ -175,35 +282,27 @@ Rules:
         result = json.loads(raw)
         intents = result.get("intents", ["ask_info"])
         plan = result.get("plan", "Address the customer query.")
-        
-        # FIX: Ensure unique tool activation to prevent duplicate calls causing pricing errors
-        raw_activated = [t for t in result.get("tools", []) if t in TOOLS]
-        raw_activated.extend(forced_tools)
+
+        # Apply mode filter to LLM choices + forced list, then deduplicate
+        raw_activated = [t for t in result.get("tools", []) if t in TOOLS and _mode_allowed(t)]
+        raw_activated += [t for t in forced_tools if _mode_allowed(t)]
         activated = list(dict.fromkeys(raw_activated))
 
-        # STRICT GUARDRAIL: Prevent premature confirmation/booking
-        # If the LLM tries to confirm/book, but the user didn't explicitly say "yes/confirm" 
-        # to a direct confirmation question, block it.
-        # EXCEPTION: If forced_tools already added them (meaning we detected a strong affirmative), let it pass.
-        if ("confirm_order" in activated and "confirm_order" not in forced_tools) or \
-           ("book_appointment" in activated and "book_appointment" not in forced_tools):
-            
-            # Did the agent ask for confirmation last turn?
-            last_assistant_msg = next((m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"), "")
-            asked_for_confirmation = any(phrase in last_assistant_msg for phrase in [
-                "would you like to proceed", "say yes or no", "shall i book", "confirm this", "ready to order"
-            ])
-            
-            # Did the user say yes?
-            if not (is_affirmative and asked_for_confirmation):
-                # The user is probably just answering a combo question like "no allergies"
-                if "confirm_order" in activated:
-                    activated.remove("confirm_order")
-                if "book_appointment" in activated:
-                    activated.remove("book_appointment")
-                
-                # Add a note to the plan so the agent knows it was blocked
-                plan += " (Note: Confirmation blocked until explicit 'yes' from customer)"
+        # GUARDRAIL: block premature confirm / book unless user explicitly said yes
+        # (forced_tools already passed this check above, so only block LLM additions)
+        for guarded in ("confirm_order", "book_appointment"):
+            if guarded in activated and guarded not in forced_tools:
+                last_assistant_msg = next(
+                    (m["content"].lower() for m in reversed(state["history"]) if m["role"] == "assistant"),
+                    "",
+                )
+                asked = any(phrase in last_assistant_msg for phrase in [
+                    "would you like to proceed", "say yes or no", "shall i book",
+                    "confirm this", "ready to order", "shall i confirm",
+                ])
+                if not (is_affirmative and asked):
+                    activated.remove(guarded)
+                    plan += f" (Note: {guarded} blocked — awaiting explicit confirmation)"
                 
     except Exception as e:
         log_agent_event(state["conversation_id"], "analyze_error", {"error": str(e)})

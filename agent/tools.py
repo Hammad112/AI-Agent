@@ -256,6 +256,18 @@ def view_cart(state: dict, **kwargs) -> dict:
 
 def confirm_order(state: dict, **kwargs) -> dict:
     """Confirm and finalise the cart as a completed order."""
+    # Safety guard: confirm_order must never fire for pure appointment businesses
+    biz_type = state.get("business_type", "")
+    APPT_KEYWORDS = ["dental","dentist","clinic","doctor","medical","salon","beauty",
+                     "spa","massage","therapy","physiotherapy","photography","photographer",
+                     "gym","fitness","yoga","barber","barbershop","dermatology","nail","lash"]
+    if any(k in biz_type.lower() for k in APPT_KEYWORDS):
+        return {
+            "success": False,
+            "needs_booking": True,
+            "message": "This business uses appointment booking. Please use the booking flow to schedule your service.",
+        }
+
     user_id = state.get("user_id")
     session_id = state.get("conversation_id", "")
     conn = _db()
@@ -378,6 +390,17 @@ def confirm_order(state: dict, **kwargs) -> dict:
 
 def book_appointment(state: dict, **kwargs) -> dict:
     """Book an appointment or reservation, parsing date/time from conversation."""
+    # Safety guard: book_appointment must never fire for pure ordering businesses
+    biz_type = state.get("business_type", "")
+    ORDER_KEYWORDS = ["restaurant","pizzeria","pizza","food delivery","fast food",
+                      "takeout","takeaway","cafe","bakery","diner","catering"]
+    if any(k in biz_type.lower() for k in ORDER_KEYWORDS):
+        return {
+            "success": False,
+            "needs_order": True,
+            "message": "This business takes orders rather than appointments. Please use the order flow.",
+        }
+
     user_id = state.get("user_id")
     query = state.get("query", "")
     history = state.get("history", [])
@@ -461,13 +484,10 @@ No markdown, just JSON."""
         if not services_to_book and booking.get("service_id"):
             services_to_book = [{"service_id": booking["service_id"], "service_name": booking.get("service_name", "Service")}]
 
-        if not services_to_book:
-            return {"success": False, "message": "No specific services identified for booking."}
-
         prov_id = booking.get("provider_id")
         assigned_provider = None
-        
-        # 1. Validate / Find Provider
+
+        # ── 1. Validate / Find Provider ─────────────────────────────────────
         if prov_id:
             p = conn.execute("SELECT * FROM service_providers WHERE id = ?", (prov_id,)).fetchone()
             if p:
@@ -488,18 +508,57 @@ No markdown, just JSON."""
             if not assigned_provider:
                 return {"success": False, "message": f"We are closed or have no providers available on {req_dt.strftime('%A')}s."}
 
-        # 2. Check for conflicts
-        conflicts = conn.execute(
-            """SELECT COUNT(*) FROM orders
-                WHERE provider_id = ? AND status IN ('pending','confirmed')
-                AND scheduled_at = ?""",
-            (prov_id, req_dt.isoformat()),
-        ).fetchone()[0]
-        if conflicts > 0:
+        # ── 2. Duration-aware conflict check (runs even if no service specified) ─
+        # This is the KEY fix: conflict detection must fire before "no service" return.
+        first_svc = conn.execute(
+            "SELECT duration_min FROM services WHERE business_name = ? ORDER BY id LIMIT 1",
+            (state.get("business_name"),)
+        ).fetchone()
+        probe_dur = (first_svc["duration_min"] or 30) if first_svc else 30
+        new_end_dt = req_dt + timedelta(minutes=probe_dur)
+
+        conflict_row = conn.execute(
+            """SELECT o.id, u.full_name as client_name, o.scheduled_at,
+                      COALESCE(s.duration_min, 30) as dur_min
+               FROM orders o
+               LEFT JOIN services s ON o.service_id = s.id
+               LEFT JOIN users u ON o.user_id = u.id
+               WHERE o.provider_id = ?
+                 AND o.status IN ('pending','confirmed')
+                 AND datetime(o.scheduled_at) < datetime(?)
+                 AND datetime(o.scheduled_at, '+' || COALESCE(s.duration_min, 30) || ' minutes') > datetime(?)
+               LIMIT 1""",
+            (prov_id, new_end_dt.isoformat(), req_dt.isoformat()),
+        ).fetchone()
+
+        if conflict_row:
+            pname = assigned_provider["name"] if assigned_provider else "The provider"
+            conflict_end = datetime.fromisoformat(conflict_row["scheduled_at"]) + timedelta(minutes=conflict_row["dur_min"])
+            alts = _find_next_available_slots(conn, prov_id, req_dt, probe_dur, count=3)
+            alt_str = ", ".join(a.strftime("%a %b %d at %I:%M %p") for a in alts)
             return {
                 "success": False,
-                "message": f"{assigned_provider['name']} already has a booking at {time_str} on {date_str}. Would you like a different time?",
+                "conflict": True,
+                "message": (
+                    f"Sorry, {pname} is not available at {req_dt.strftime('%I:%M %p')} on "
+                    f"{req_dt.strftime('%A %B %d')} — there is already a booking from "
+                    f"{datetime.fromisoformat(conflict_row['scheduled_at']).strftime('%I:%M %p')} "
+                    f"until {conflict_end.strftime('%I:%M %p')}. "
+                    f"Next available: {alt_str or 'please call us to check availability'}."
+                ),
+                "alternatives": [a.isoformat() for a in alts],
             }
+
+        # ── 3. Auto-select default service if none specified ─────────────────
+        if not services_to_book:
+            default_svc = conn.execute(
+                "SELECT id, name FROM services WHERE business_name = ? ORDER BY id LIMIT 1",
+                (state.get("business_name"),)
+            ).fetchone()
+            if default_svc:
+                services_to_book = [{"service_id": default_svc["id"], "service_name": default_svc["name"]}]
+            else:
+                return {"success": False, "message": "No specific services identified for booking. What service would you like?"}
 
         # 3. Book each service
         user = conn.execute("SELECT full_name FROM users WHERE id = ?", (user_id,)).fetchone()
@@ -534,7 +593,12 @@ No markdown, just JSON."""
                 (user_id, order_id, f"Appointment: {svc_name}", f"Booking #{order_id} for {svc_name}. Ref: {ref}", current_dt.isoformat(), end_dt.isoformat(), assigned_provider["name"], 'confirmed'),
             )
             
-            _generate_ics(order_id, svc_name, current_dt, end_dt, assigned_provider["name"], patient_name)
+            _generate_ics(
+                order_id, svc_name, current_dt, end_dt,
+                assigned_provider["name"], patient_name,
+                business_name=state.get("business_name", ""),
+                method="REQUEST", sequence=0,
+            )
             
             cumulative_msg += f"\n- **{svc_name}**: {current_dt.strftime('%H:%M')} ({duration} min) - ${price:.2f} [Ref: {ref}]"
             # Sequence them back-to-back if multiple
@@ -604,12 +668,28 @@ Interpret relative dates. No markdown, just JSON."""
             (new_dt, "Rescheduled via AI assistant", order["id"]),
         )
 
+        # Get actual service duration from DB
+        svc_dur = conn.execute(
+            "SELECT duration_min FROM services WHERE id = ?", (order["service_id"],)
+        ).fetchone()
+        dur_min = (svc_dur["duration_min"] or 30) if svc_dur else 30
+
+        # Get provider name
+        prov_row = conn.execute(
+            "SELECT name FROM service_providers WHERE id = ?", (order["provider_id"],)
+        ).fetchone()
+        provider_name = prov_row["name"] if prov_row else "Assigned Staff"
+
+        # Get patient name
+        user_row = conn.execute("SELECT full_name FROM users WHERE id = ?", (user_id,)).fetchone()
+        patient_name = user_row["full_name"] if user_row else "Customer"
+
         # Update calendar event
         try:
             start = datetime.fromisoformat(new_dt)
-            end = start + timedelta(minutes=30)
+            end = start + timedelta(minutes=dur_min)
             conn.execute(
-                "UPDATE calendar_events SET start_time = ?, end_time = ?, status = 'rescheduled' WHERE order_id = ?",
+                "UPDATE calendar_events SET start_time = ?, end_time = ?, status = 'confirmed' WHERE order_id = ?",
                 (start.isoformat(), end.isoformat(), order["id"]),
             )
         except ValueError:
@@ -617,14 +697,28 @@ Interpret relative dates. No markdown, just JSON."""
 
         conn.commit()
 
-        # Regenerate .ics
+        # ── ICS: cancel old event then write updated event ───────────────────
         try:
             start = datetime.fromisoformat(new_dt)
-            end = start + timedelta(minutes=30)
-            user = conn.execute("SELECT full_name FROM users WHERE id = ?", (user_id,)).fetchone()
-            patient_name = user["full_name"] if user and user["full_name"] else "Customer"
-            _generate_ics(order["id"], order["service_name"], start, end, "", patient_name)
-        except ValueError:
+            end = start + timedelta(minutes=dur_min)
+            biz_name = state.get("business_name", "")
+
+            # Step 1: CANCEL the old event (SEQUENCE=1 so calendar app removes it)
+            _generate_ics(
+                order["id"], order["service_name"], start, end,
+                provider_name, patient_name,
+                business_name=biz_name,
+                method="CANCEL", sequence=1,
+            )
+
+            # Step 2: REQUEST the new event (SEQUENCE=2 so calendar app adds new time)
+            _generate_ics(
+                order["id"], order["service_name"], start, end,
+                provider_name, patient_name,
+                business_name=biz_name,
+                method="REQUEST", sequence=2,
+            )
+        except Exception:
             pass
 
         booking_ref = _generate_ref("APPT", order["id"])
@@ -664,14 +758,41 @@ def cancel_booking(state: dict, **kwargs) -> dict:
         )
         conn.commit()
         booking_ref = _generate_ref("APPT", order["id"])
+
         # Format date for readability
         try:
-             dt = datetime.fromisoformat(order["scheduled_at"].replace("T", " "))
-             dt_str = dt.strftime("%A, %B %d at %I:%M %p")
-        except:
-             dt_str = order["scheduled_at"]
+            dt = datetime.fromisoformat(order["scheduled_at"])
+            dt_str = dt.strftime("%A, %B %d at %I:%M %p").replace(" 0", " ")
+        except Exception:
+            dt_str = order["scheduled_at"]
 
-        return {
+        # Generate CANCEL ICS so the event is removed from the customer's calendar
+        try:
+            start = datetime.fromisoformat(order["scheduled_at"])
+            svc_dur = conn.execute(
+                "SELECT duration_min FROM services WHERE id = ?", (order["service_id"],)
+            ).fetchone()
+            dur_min = (svc_dur["duration_min"] or 30) if svc_dur else 30
+            end_dt  = start + timedelta(minutes=dur_min)
+
+            prov_row = conn.execute(
+                "SELECT name FROM service_providers WHERE id = ?", (order["provider_id"],)
+            ).fetchone()
+            provider_name = prov_row["name"] if prov_row else "Assigned Staff"
+
+            user_row = conn.execute("SELECT full_name FROM users WHERE id = ?", (user_id,)).fetchone()
+            patient_name = user_row["full_name"] if user_row else "Customer"
+
+            cancel_path = _generate_ics(
+                order["id"], order["service_name"], start, end_dt,
+                provider_name, patient_name,
+                business_name=state.get("business_name", ""),
+                method="CANCEL", sequence=1,
+            )
+        except Exception:
+            cancel_path = None
+
+        res = {
             "success": True,
             "cancelled_booking_id": order["id"],
             "booking_ref": booking_ref,
@@ -679,6 +800,9 @@ def cancel_booking(state: dict, **kwargs) -> dict:
             "scheduled_at": dt_str,
             "message": f"✅ Your appointment for {order['service_name']} on {dt_str} has been successfully cancelled. Reference: {booking_ref}.",
         }
+        if cancel_path:
+            res["cancel_ics_url"] = f"/calendar/{os.path.basename(cancel_path)}"
+        return res
     finally:
         conn.close()
 
@@ -1328,59 +1452,147 @@ def check_family_members(state: dict, **kwargs) -> dict:
 # Calendar / ICS Helper
 # ─────────────────────────────────────────────
 
-def _generate_ics(order_id: int, title: str, start: datetime, end: datetime, provider: str, patient_name: str = "Customer") -> str:
-    """Generate a local .ics calendar file for an appointment."""
+def _generate_ics(
+    order_id: int,
+    title: str,
+    start: datetime,
+    end: datetime,
+    provider: str,
+    patient_name: str = "Customer",
+    business_name: str = "",
+    method: str = "REQUEST",   # "REQUEST" = book/update, "CANCEL" = remove from calendar
+    sequence: int = 0,         # increment on every update/cancel so calendar app knows it's newer
+) -> str:
+    """
+    Generate a standards-compliant .ics calendar file.
+
+    Reschedule flow  → call twice:
+        1st  _generate_ics(..., method="CANCEL",  sequence=prev+1)  → removes old event
+        2nd  _generate_ics(..., method="REQUEST", sequence=prev+2)  → adds new event
+
+    Cancel flow      → call once:
+             _generate_ics(..., method="CANCEL",  sequence=1)
+
+    The UID is always  booking-{order_id}@genericagent  so the calendar app
+    can match updates/cancellations to the original event.
+    """
     calendar_dir = os.path.join(os.getcwd(), "calendar")
     os.makedirs(calendar_dir, exist_ok=True)
-    
-    safe_name = patient_name.replace(" ", "_").lower()
-    filepath = os.path.join(calendar_dir, f"{safe_name}_appointment_{order_id}.ics")
 
-    timestamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
-    start_utc = start.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    end_utc = end.astimezone(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    
-    # Calculate duration
-    duration_min = int((end - start).total_seconds() / 60)
+    safe_name    = re.sub(r"[^a-z0-9_]", "_", patient_name.lower())
+    safe_method  = method.upper()
 
-    # Safe references
-    safe_provider = provider or "Assigned Staff"
-    
-    # In a real system, you'd fetch business details. For generic, we use placeholders or passed context.
-    # Ref format expected: APPT-00000 + ID
-    ref_num = f"APPT-{order_id:05d}"
-    
-    ics_content = f"""BEGIN:VCALENDAR
-VERSION:2.0
-PRODID:-//Generic AI Business Agent//Appointment System//EN
-CALSCALE:GREGORIAN
-METHOD:REQUEST
-BEGIN:VEVENT
-UID:booking-{order_id}@genericagent
-DTSTAMP:{timestamp}
-DTSTART:{start_utc}
-DTEND:{end_utc}
-SUMMARY:{title}
-DESCRIPTION:Appointment #{ref_num}\\nService: {title}\\nProvider: {safe_provider}\\nDuration: {duration_min} min\\nReference: {ref_num}
-ORGANIZER;CN=Business System:mailto:noreply@genericagent.com
-ATTENDEE;CN={patient_name};RSVP=TRUE:mailto:customer@example.com
-STATUS:CONFIRMED
-SEQUENCE:0
-BEGIN:VALARM
-TRIGGER:-PT1H
-ACTION:DISPLAY
-DESCRIPTION:Reminder: Your appointment is in 1 hour
-END:VALARM
-BEGIN:VALARM
-TRIGGER:-PT24H
-ACTION:DISPLAY
-DESCRIPTION:Reminder: Your appointment is tomorrow
-END:VALARM
-END:VEVENT
-END:VCALENDAR"""
+    # Separate filenames: cancel gets its own file so both are importable
+    if safe_method == "CANCEL":
+        filename = f"{safe_name}_cancel_{order_id}.ics"
+    else:
+        filename = f"{safe_name}_appointment_{order_id}.ics"
 
-    with open(filepath, "w") as f:
+    filepath = os.path.join(calendar_dir, filename)
+
+    # Times — handle both naive and aware datetimes
+    try:
+        start_utc = start.astimezone(timezone.utc)
+        end_utc   = end.astimezone(timezone.utc)
+    except (TypeError, AttributeError):
+        start_utc = start.replace(tzinfo=timezone.utc)
+        end_utc   = end.replace(tzinfo=timezone.utc)
+
+    dtstamp   = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    dtstart   = start_utc.strftime('%Y%m%dT%H%M%SZ')
+    dtend     = end_utc.strftime('%Y%m%dT%H%M%SZ')
+    dur_min   = int((end - start).total_seconds() / 60)
+    ref_num   = f"APPT-{order_id:05d}"
+    safe_prov = provider or "Assigned Staff"
+    biz_label = business_name or "Business"
+
+    # ── Friendly date/time strings for DESCRIPTION ────────────────────────────
+    start_local = start if start.tzinfo is None else start.astimezone()
+    end_local   = end   if end.tzinfo   is None else end.astimezone()
+    date_str  = start_local.strftime("%A, %B %d, %Y")         # e.g. Tuesday, March 17, 2026
+    time_from = start_local.strftime("%I:%M %p").lstrip("0")  # e.g. 9:00 AM
+    time_to   = end_local.strftime("%I:%M %p").lstrip("0")    # e.g. 10:00 AM
+
+    # ── SUMMARY line ──────────────────────────────────────────────────────────
+    if safe_method == "CANCEL":
+        summary = f"CANCELLED: {title} — {patient_name} with {safe_prov}"
+        status  = "CANCELLED"
+    else:
+        summary = f"{title} — {patient_name} with {safe_prov}"
+        status  = "CONFIRMED"
+
+    # ── Structured DESCRIPTION (readable in any calendar app) ─────────────────
+    sep = "─" * 38
+    if safe_method == "CANCEL":
+        description = (
+            f"⚠ APPOINTMENT CANCELLED\\n"
+            f"{sep}\\n"
+            f"Service:  {title}\\n"
+            f"Patient:  {patient_name}\\n"
+            f"Provider: {safe_prov}\\n"
+            f"Was:      {date_str}  {time_from} – {time_to}\\n"
+            f"Ref:      {ref_num}\\n"
+            f"{sep}\\n"
+            f"This appointment has been cancelled.\\n"
+            f"Please contact {biz_label} to rebook."
+        )
+    else:
+        description = (
+            f"📋 APPOINTMENT DETAILS\\n"
+            f"{sep}\\n"
+            f"👤 Patient:   {patient_name}\\n"
+            f"🩺 Provider:  {safe_prov}\\n"
+            f"💼 Service:   {title}\\n"
+            f"📅 Date:      {date_str}\\n"
+            f"🕐 Time:      {time_from} – {time_to} ({dur_min} min)\\n"
+            f"🏥 Clinic:    {biz_label}\\n"
+            f"📋 Reference: {ref_num}\\n"
+            f"{sep}\\n"
+            f"⏰ Reminders set for 24 hours and 1 hour before."
+        )
+
+    # ── Alarms (only for confirmed events) ───────────────────────────────────
+    alarms = ""
+    if safe_method != "CANCEL":
+        alarms = (
+            f"BEGIN:VALARM\r\n"
+            f"TRIGGER:-PT24H\r\n"
+            f"ACTION:DISPLAY\r\n"
+            f"DESCRIPTION:Reminder: {title} with {safe_prov} is tomorrow\r\n"
+            f"END:VALARM\r\n"
+            f"BEGIN:VALARM\r\n"
+            f"TRIGGER:-PT1H\r\n"
+            f"ACTION:DISPLAY\r\n"
+            f"DESCRIPTION:Reminder: {title} starts in 1 hour\r\n"
+            f"END:VALARM\r\n"
+        )
+
+    ics_content = (
+        f"BEGIN:VCALENDAR\r\n"
+        f"VERSION:2.0\r\n"
+        f"PRODID:-//Generic AI Business Agent//Appointment System//EN\r\n"
+        f"CALSCALE:GREGORIAN\r\n"
+        f"METHOD:{safe_method}\r\n"
+        f"BEGIN:VEVENT\r\n"
+        f"UID:booking-{order_id}@genericagent\r\n"
+        f"DTSTAMP:{dtstamp}\r\n"
+        f"DTSTART:{dtstart}\r\n"
+        f"DTEND:{dtend}\r\n"
+        f"SUMMARY:{summary}\r\n"
+        f"DESCRIPTION:{description}\r\n"
+        f"ORGANIZER;CN={biz_label}:mailto:noreply@genericagent.com\r\n"
+        f"ATTENDEE;CN={patient_name};RSVP=TRUE:mailto:customer@example.com\r\n"
+        f"LOCATION:{biz_label}\r\n"
+        f"STATUS:{status}\r\n"
+        f"SEQUENCE:{sequence}\r\n"
+        f"{alarms}"
+        f"END:VEVENT\r\n"
+        f"END:VCALENDAR\r\n"
+    )
+
+    with open(filepath, "w", encoding="utf-8") as f:
         f.write(ics_content)
+
     return filepath
 
 

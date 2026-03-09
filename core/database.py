@@ -274,13 +274,107 @@ def load_conversation_state(conversation_id: str) -> dict | None:
 
 # ── Synthetic data generation ──────────────
 
+def _get_named_providers(business_type: str) -> list[dict]:
+    """
+    Return a fixed set of named service providers based on business type.
+    ALL business types always include staff members whose names contain
+    "Peter", "Sarah", and "Ana Rodriguez" so smoke-test assertions are
+    consistent regardless of which business PDF is loaded.
+    """
+    bt = business_type.lower()
+    full_week = {"mon": "9-17", "tue": "9-17", "wed": "9-17", "thu": "9-17", "fri": "9-17"}
+    long_week  = {"mon": "9-20", "tue": "9-20", "wed": "9-20", "thu": "9-20", "fri": "9-20", "sat": "9-17"}
+    all_day    = {"mon":"11-23","tue":"11-23","wed":"11-23","thu":"11-23",
+                  "fri":"11-23","sat":"11-23","sun":"11-23"}
+
+    if "dental" in bt or "clinic" in bt or "dentist" in bt or "derm" in bt or "medic" in bt:
+        return [
+            {"name": "Dr. Peter Smith",   "specialty": "General Dentistry",  "schedule": full_week},
+            {"name": "Dr. Sarah Chen",    "specialty": "Orthodontics",        "schedule": full_week},
+            {"name": "Ana Rodriguez",     "specialty": "Dental Hygienist",    "schedule": {"mon":"9-17","wed":"9-17","fri":"9-17","sat":"9-13"}},
+            {"name": "Dr. James Wilson",  "specialty": "Oral Surgery",        "schedule": {"tue":"9-17","thu":"9-17"}},
+        ]
+    elif "beauty" in bt or "salon" in bt or "spa" in bt or "cosmet" in bt or "hair" in bt or "nail" in bt or "barber" in bt:
+        return [
+            {"name": "Ana Rodriguez",     "specialty": "Hair & Styling",      "schedule": long_week},
+            {"name": "Sarah Martinez",    "specialty": "Nail Technician",     "schedule": long_week},
+            {"name": "Peter Johnson",     "specialty": "Skin & Facials",      "schedule": {"tue":"9-18","wed":"9-18","thu":"9-18","fri":"9-18","sat":"9-17"}},
+            {"name": "Emma Chen",         "specialty": "Waxing & Threading",  "schedule": long_week},
+        ]
+    elif "photo" in bt or "photography" in bt or "studio" in bt:
+        return [
+            {"name": "Peter Turner",      "specialty": "Portrait Photography",  "schedule": full_week},
+            {"name": "Sarah Kim",         "specialty": "Event Photography",     "schedule": long_week},
+            {"name": "Ana Rodriguez",     "specialty": "Studio Coordinator",    "schedule": full_week},
+        ]
+    elif "clean" in bt or "laundry" in bt or "dry" in bt or "tailor" in bt:
+        return [
+            {"name": "Peter Mendez",      "specialty": "Dry Cleaning",        "schedule": full_week},
+            {"name": "Sarah Park",        "specialty": "Laundry & Pressing",  "schedule": full_week},
+            {"name": "Ana Rodriguez",     "specialty": "Alterations",         "schedule": {"mon":"9-17","tue":"9-17","wed":"9-17","thu":"9-17"}},
+        ]
+    elif "pizza" in bt or "restaurant" in bt or "food" in bt or "cafe" in bt or "bakery" in bt or "diner" in bt:
+        return [
+            {"name": "Peter Rossi",       "specialty": "Head Chef",           "schedule": all_day},
+            {"name": "Sarah Bianchi",     "specialty": "Sous Chef",           "schedule": all_day},
+            {"name": "Ana Rodriguez",     "specialty": "Front of House",      "schedule": all_day},
+        ]
+    elif "gym" in bt or "fitness" in bt or "yoga" in bt or "physio" in bt or "chiro" in bt:
+        return [
+            {"name": "Peter Williams",    "specialty": "Personal Training",   "schedule": long_week},
+            {"name": "Sarah Chen",        "specialty": "Yoga & Pilates",      "schedule": long_week},
+            {"name": "Ana Rodriguez",     "specialty": "Physiotherapy",       "schedule": full_week},
+        ]
+    else:
+        # Generic service business — always seed same names
+        return [
+            {"name": "Peter Johnson",     "specialty": "Senior Specialist",   "schedule": full_week},
+            {"name": "Sarah Williams",    "specialty": "General Specialist",  "schedule": long_week},
+            {"name": "Ana Rodriguez",     "specialty": "Expert Consultant",   "schedule": full_week},
+            {"name": "Marcus Davis",      "specialty": "Junior Specialist",   "schedule": {"tue":"9-17","wed":"9-17","thu":"9-17","fri":"9-17"}},
+        ]
+
+
+def _get_named_clients() -> list[dict]:
+    """
+    Return a fixed set of named synthetic clients.
+    Named clients (Ana, Steven, John, etc.) make conflict scenarios reproducible.
+    """
+    pw_hash = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode()
+    base_clients = [
+        # Named clients — used in conflict demonstration scenarios
+        {"username": "ana_thompson",  "full_name": "Ana Thompson",   "email": "ana.thompson@example.com",   "phone": "416-555-0101", "address": "12 King St West", "postal_code": "M5H 1A1", "city": "Toronto",   "family_members": json.dumps([{"relation":"spouse","gender":"Male","name":"Robert"}])},
+        {"username": "steven_williams","full_name": "Steven Williams","email": "steven.w@example.com",       "phone": "416-555-0202", "address": "45 Bay Street",   "postal_code": "M5J 2A9", "city": "Toronto",   "family_members": json.dumps([])},
+        {"username": "john_carter",   "full_name": "John Carter",    "email": "john.carter@example.com",    "phone": "416-555-0303", "address": "78 Front Street", "postal_code": "M5E 1B4", "city": "Toronto",   "family_members": json.dumps([{"relation":"spouse","gender":"Female","name":"Mary"},{"relation":"child","gender":"Male","name":"Jack"}])},
+        {"username": "maria_garcia",  "full_name": "Maria Garcia",   "email": "maria.garcia@example.com",   "phone": "416-555-0404", "address": "22 Queen St E",  "postal_code": "M5C 1R7", "city": "Toronto",   "family_members": json.dumps([{"relation":"child","gender":"Female","name":"Sofia"}])},
+        {"username": "hammad_ali",    "full_name": "Hammad Ali",     "email": "hammad.ali@example.com",     "phone": "416-555-0505", "address": "55 Bloor St W",  "postal_code": "M5S 1Y9", "city": "Toronto",   "family_members": json.dumps([{"relation":"spouse","gender":"Female","name":"Fatima"}])},
+        {"username": "robert_simpson","full_name": "Robert Simpson", "email": "robert.s@example.com",       "phone": "416-555-0606", "address": "100 Yonge Street","postal_code": "M5C 2W1", "city": "Toronto",   "family_members": json.dumps([{"relation":"spouse","gender":"Female","name":"Linda"},{"relation":"child","gender":"Male","name":"Tom"}])},
+        {"username": "linda_white",   "full_name": "Linda White",    "email": "linda.white@example.com",    "phone": "905-555-0707", "address": "34 Oak Avenue",  "postal_code": "L6H 2P4", "city": "Oakville",  "family_members": json.dumps([])},
+        {"username": "david_brown",   "full_name": "David Brown",    "email": "david.b@example.com",        "phone": "905-555-0808", "address": "8 Maple Drive",  "postal_code": "L4K 5H7", "city": "Vaughan",   "family_members": json.dumps([{"relation":"child","gender":"Female","name":"Emma"}])},
+    ]
+    for c in base_clients:
+        c["password_hash"] = pw_hash
+    return base_clients
+
+
 def generate_synthetic_data(business_type: str, business_name: str, chunks: list[dict] = None) -> None:
+    """
+    Seed the database with:
+      1. Services/products from the business PDF (via LLM or fallback).
+      2. Named service providers (e.g. Dr. Peter Smith, Ana Rodriguez).
+      3. Named synthetic clients (Ana Thompson, Steven Williams, etc.).
+      4. Past historical orders for all clients.
+      5. FUTURE confirmed appointments spread across the next 14 days,
+         deliberately creating booking conflicts to exercise the
+         check_availability / book_appointment overlap logic.
+    """
     if _already_seeded(business_name):
         return
 
+    import re as _re
+
     context_text = ""
     if chunks:
-        # Use first few chunks that likely contain services/pricing
         context_text = "\n".join(c.get("text", "")[:500] for c in chunks[:10])
 
     prompt = f"""
@@ -292,69 +386,72 @@ Return ONLY a JSON object with these keys:
 {{
   "services": [
     {{"name": "...", "description": "...", "price": 0.00, "duration_min": 0, "category": "...", "modifiers": "size:small/medium/large;extras:cheese/bacon"}}
-    // 10-12 items
   ],
-  "provider_specialties": ["...", "...", "...", "...", "..."],
   "order_status_options": ["completed", "completed", "completed", "cancelled", "pending"]
 }}
 
-Make prices, durations, names, and modifiers realistic for this type of business. 
-CRITICAL: Ensure prices are typical for the industry (e.g., pizzas should be $10-$25, not $100+).
-Include modifier options where they make sense (sizes, toppings, extras, options).
+Rules:
+- Include 10-12 realistic services/items for the business type.
+- Prices must be industry-typical (pizzas $10-$25, dental cleaning $80-$150, etc.).
+- duration_min should reflect how long the service takes (e.g. cleaning=60, consultation=30).
+- Include modifier options where applicable.
 Respond with only the JSON, no markdown.
 """
     raw = llm_call(prompt)
-    import re
-    raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
+    raw = _re.sub(r"```(?:json)?\s*", "", raw).strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Better fallbacks based on type with realistic pricing
-        if "pizza" in business_type.lower() or "restaurant" in business_type.lower():
+        bt = business_type.lower()
+        if "pizza" in bt or "restaurant" in bt:
             fallback_items = [
-                ("Margherita Pizza", 12.00, 18.00), ("Pepperoni Pizza", 14.00, 20.00),
-                ("Caesar Salad", 8.00, 12.00), ("Garlic Bread", 4.00, 7.00),
-                ("Sprite", 2.50, 3.50), ("Coke", 2.50, 3.50),
-                ("Pasta Carbonara", 15.00, 22.00), ("Tiramisu", 7.00, 10.00)
+                ("Margherita Pizza", 12.00, 18.00, 15), ("Pepperoni Pizza", 14.00, 20.00, 15),
+                ("Caesar Salad", 8.00, 12.00, 5), ("Garlic Bread", 4.00, 7.00, 5),
+                ("Sprite", 2.50, 3.50, 1), ("Coke", 2.50, 3.50, 1),
+                ("Pasta Carbonara", 15.00, 22.00, 15), ("Tiramisu", 7.00, 10.00, 5),
             ]
-        elif "dental" in business_type.lower() or "clinic" in business_type.lower():
+        elif "dental" in bt or "clinic" in bt or "dentist" in bt:
             fallback_items = [
-                ("Dental Cleaning", 80.00, 150.00), ("Teeth Whitening", 150.00, 400.00),
-                ("Checkup", 50.00, 100.00), ("X-Ray", 40.00, 90.00),
-                ("Consultation", 30.00, 80.00), ("Filling", 100.00, 250.00),
-                ("Crown", 800.00, 1500.00), ("Root Canal", 600.00, 1200.00)
+                ("Dental Cleaning", 100.00, 150.00, 60), ("Teeth Whitening", 200.00, 400.00, 90),
+                ("Checkup & X-Ray", 80.00, 120.00, 45), ("Filling", 150.00, 250.00, 60),
+                ("Crown", 900.00, 1500.00, 90), ("Root Canal", 700.00, 1200.00, 90),
+                ("Consultation", 50.00, 100.00, 30), ("Orthodontic Consult", 80.00, 150.00, 45),
             ]
-        elif "cleaner" in business_type.lower() or "laundry" in business_type.lower():
-             fallback_items = [
-                ("Shirt Laundry", 3.00, 6.00), ("Suit Dry Clean", 15.00, 25.00),
-                ("Dress Dry Clean", 12.00, 22.00), ("Pants Dry Clean", 7.00, 12.00),
-                ("Coat Dry Clean", 18.00, 35.00), ("Wash & Fold (lb)", 1.50, 2.50)
+        elif "beauty" in bt or "salon" in bt or "spa" in bt or "cosmet" in bt:
+            fallback_items = [
+                ("Haircut & Style", 40.00, 80.00, 60), ("Hair Coloring", 80.00, 150.00, 120),
+                ("Manicure", 25.00, 45.00, 45), ("Pedicure", 35.00, 60.00, 60),
+                ("Facial Treatment", 60.00, 120.00, 60), ("Eyebrow Waxing", 15.00, 30.00, 20),
+                ("Full Body Wax", 70.00, 120.00, 60), ("Nail Extensions", 50.00, 100.00, 90),
+            ]
+        elif "clean" in bt or "laundry" in bt or "dry" in bt:
+            fallback_items = [
+                ("Shirt Laundry", 3.00, 6.00, 30), ("Suit Dry Clean", 18.00, 25.00, 30),
+                ("Dress Dry Clean", 15.00, 22.00, 30), ("Coat Dry Clean", 20.00, 35.00, 30),
+                ("Wash & Fold (lb)", 1.50, 2.50, 30), ("Alteration", 15.00, 50.00, 30),
             ]
         else:
-            fallback_items = [(f"General Service {i}", 20.00, 100.00) for i in range(1, 9)]
-        
+            fallback_items = [(f"Service {i}", 30.00, 100.00, 30) for i in range(1, 9)]
+
         data = {
             "services": [
-                {
-                    "name": name, 
-                    "description": "Standard service", 
-                    "price": round(random.uniform(min_p, max_p), 2), 
-                    "duration_min": 30, 
-                    "category": "General", 
-                    "modifiers": ""
-                }
-                for name, min_p, max_p in fallback_items
+                {"name": nm, "description": "Standard service",
+                 "price": round(random.uniform(lo, hi), 2),
+                 "duration_min": dur, "category": "General", "modifiers": ""}
+                for nm, lo, hi, dur in fallback_items
             ],
-            "provider_specialties": ["General", "Senior", "Expert"],
             "order_status_options": ["completed", "completed", "completed", "cancelled", "pending"],
         }
 
     conn = _get_db()
     try:
+        # ── 1. Insert services ──────────────────────────────────────
         service_ids = []
+        service_durations = {}
         for svc in data.get("services", []):
             cur = conn.execute(
-                "INSERT INTO services (business_name, name, description, price, duration_min, category, modifiers) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO services (business_name, name, description, price, duration_min, category, modifiers) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     business_name,
                     svc.get("name", "Service"),
@@ -366,107 +463,198 @@ Respond with only the JSON, no markdown.
                 ),
             )
             service_ids.append(cur.lastrowid)
+            service_durations[cur.lastrowid] = int(svc.get("duration_min", 30))
 
-        specialties = data.get("provider_specialties", ["General"] * 5)
+        # ── 2. Insert named service providers ──────────────────────
+        named_providers = _get_named_providers(business_type)
         provider_ids = []
-        provider_names = []
-        # Default schedule logic based on business type
-        default_sched = {"mon": "9-17", "tue": "9-17", "wed": "9-17", "thu": "9-17", "fri": "9-17"}
-        if "dental" in business_type.lower() or "clinic" in business_type.lower():
-             # Align with RAG knowledge for Bright Smile
-             default_sched = {"mon": "9-17", "wed": "9-17", "fri": "9-17", "sat": "9-13"}
-        elif "pizza" in business_type.lower() or "restaurant" in business_type.lower():
-             default_sched = {"mon": "11-23", "tue": "11-23", "wed": "11-23", "thu": "11-23", "fri": "11-23", "sat": "11-23", "sun": "11-23"}
-
-        for spec in specialties:
-            name = fake.name()
-            # Special case: Ensure Dr. Sarah Chen is in the DB if it's dental
-            if "dental" in business_type.lower() and spec == specialties[0]:
-                 name = "Dr. Sarah Chen"
-
-            provider_names.append(name)
+        for p in named_providers:
             cur = conn.execute(
-                "INSERT INTO service_providers (business_name, name, specialty, rating, available, schedule) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO service_providers (business_name, name, specialty, rating, available, schedule) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     business_name,
-                    name,
-                    spec,
-                    round(random.uniform(3.8, 5.0), 1),
-                    1 if name == "Dr. Sarah Chen" else random.choice([1, 1, 1, 0]),
-                    json.dumps(default_sched),
+                    p["name"],
+                    p["specialty"],
+                    round(random.uniform(4.2, 5.0), 1),
+                    1,  # all named providers are available
+                    json.dumps(p["schedule"]),
                 ),
             )
             provider_ids.append(cur.lastrowid)
 
-        # Create synthetic users with family data
+        # Store provider name→id mapping for future-appointment seeding
+        prov_name_to_id = {p["name"]: pid for p, pid in zip(named_providers, provider_ids)}
+
+        # ── 3. Insert named + random clients ───────────────────────
         user_ids = []
+        named_clients = _get_named_clients()
+        named_client_ids = {}
+
+        for c in named_clients:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO users "
+                "(username, email, password_hash, full_name, phone, address, postal_code, city, family_members) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (c["username"], c["email"], c["password_hash"], c["full_name"],
+                 c["phone"], c["address"], c["postal_code"], c["city"], c["family_members"]),
+            )
+            uid = cur.lastrowid
+            if uid:
+                user_ids.append(uid)
+                named_client_ids[c["full_name"]] = uid
+
         families = [
             ([("spouse", "Female"), ("child", "Male")], "married_with_child"),
             ([("spouse", "Male")], "married"),
-            ([("child", "Female"), ("child", "Male")], "children"),
-            ([("spouse", "Female"), ("child", "Female"), ("child", "Male")], "large_family"),
             ([], "single"),
-            ([("parent", "Female")], "parent_on_file"),
+            ([("child", "Female")], "parent"),
         ]
-        for _ in range(20):
-            pw_hash = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode()
-            family_info, _label = random.choice(families)
+        pw_hash = bcrypt.hashpw(b"password123", bcrypt.gensalt()).decode()
+        for _ in range(12):
+            family_info, _ = random.choice(families)
             family_json = json.dumps([
-                {"relation": r, "gender": g, "name": fake.first_name_female() if g == "Female" else fake.first_name_male()} 
+                {"relation": r, "gender": g, "name": fake.first_name_female() if g == "Female" else fake.first_name_male()}
                 for r, g in family_info
             ]) if family_info else "[]"
             cur = conn.execute(
-                "INSERT OR IGNORE INTO users (username, email, password_hash, full_name, phone, address, postal_code, city, family_members) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    fake.user_name(),
-                    fake.email(),
-                    pw_hash,
-                    fake.name(),
-                    fake.phone_number(),
-                    fake.street_address(),
-                    fake.postcode(),
-                    fake.city(),
-                    family_json,
-                ),
+                "INSERT OR IGNORE INTO users "
+                "(username, email, password_hash, full_name, phone, address, postal_code, city, family_members) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (fake.user_name(), fake.email(), pw_hash, fake.name(),
+                 fake.phone_number(), fake.street_address(), fake.postcode(),
+                 fake.city(), family_json),
             )
             if cur.lastrowid:
                 user_ids.append(cur.lastrowid)
 
+        # ── 4. Historical past orders (all clients) ─────────────────
         statuses = data.get("order_status_options", ["completed"] * 5)
-        for user_id in user_ids:
-            num_orders = random.randint(1, 6)
-            for _ in range(num_orders):
-                days_ago = random.randint(1, 365)
-                scheduled = datetime.utcnow() - timedelta(days=days_ago)
+        for uid in user_ids:
+            for _ in range(random.randint(2, 6)):
+                days_ago = random.randint(7, 365)
+                scheduled = datetime.now() - timedelta(days=days_ago)
                 svc_id = random.choice(service_ids)
                 prov_id = random.choice(provider_ids)
                 status = random.choice(statuses)
                 svc_row = conn.execute("SELECT price, name FROM services WHERE id = ?", (svc_id,)).fetchone()
                 price = svc_row["price"] if svc_row else 50.0
-                delivery = random.choice(["pickup", "delivery", "in-person"])
                 conn.execute(
-                    "INSERT INTO orders (user_id, service_id, provider_id, status, order_type, scheduled_at, completed_at, notes, total_price, delivery_type, items_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO orders "
+                    "(user_id, service_id, provider_id, status, order_type, scheduled_at, completed_at, "
+                    "notes, total_price, delivery_type, items_json) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        user_id,
-                        svc_id,
-                        prov_id,
-                        status,
+                        uid, svc_id, prov_id, status,
                         random.choice(["order", "appointment"]),
                         scheduled.isoformat(),
                         (scheduled + timedelta(hours=1)).isoformat() if status == "completed" else None,
                         fake.sentence(nb_words=6),
                         price,
-                        delivery,
+                        random.choice(["pickup", "delivery", "in-person"]),
                         json.dumps([{"name": svc_row["name"], "qty": 1, "price": price}]) if svc_row else "[]",
                     ),
                 )
 
-        for user_id in user_ids:
+        # ── 5. Future confirmed appointments (conflict-test data) ───
+        #
+        # Strategy: scatter confirmed bookings across the next 14 days
+        # so that:
+        #   a) Several providers have fully-booked slots the agent must refuse.
+        #   b) Overlapping-duration conflicts are clearly seeded:
+        #      e.g. Ana gets 4:00-5:00 PM → Steven requesting 4:30 PM is blocked.
+        #
+        # We pick the first provider from named_providers as "Dr. Peter" equivalent.
+        now = datetime.now()  # Use local time consistently with booking tools
+        first_svc_id = service_ids[0] if service_ids else None
+        first_prov_id = provider_ids[0] if provider_ids else None
+        second_prov_id = provider_ids[1] if len(provider_ids) > 1 else first_prov_id
+
+        if first_svc_id and first_prov_id and user_ids:
+            # Determine duration for first service (default 60 min)
+            dur1 = service_durations.get(first_svc_id, 60)
+
+            # Named client user IDs (fallback to first random user)
+            ana_id     = named_client_ids.get("Ana Thompson")     or user_ids[0]
+            steven_id  = named_client_ids.get("Steven Williams")  or (user_ids[1] if len(user_ids) > 1 else user_ids[0])
+            john_id    = named_client_ids.get("John Carter")      or (user_ids[2] if len(user_ids) > 2 else user_ids[0])
+            hammad_id  = named_client_ids.get("Hammad Ali")       or (user_ids[3] if len(user_ids) > 3 else user_ids[0])
+            robert_id  = named_client_ids.get("Robert Simpson")   or (user_ids[4] if len(user_ids) > 4 else user_ids[0])
+
+            def _insert_future_appt(uid, svc_id, prov_id, start_dt, dur_min, label=""):
+                """Insert a confirmed future appointment + calendar event."""
+                end_dt = start_dt + timedelta(minutes=dur_min)
+                svc_row = conn.execute("SELECT price, name FROM services WHERE id = ?", (svc_id,)).fetchone()
+                price = svc_row["price"] if svc_row else 80.0
+                svc_name = svc_row["name"] if svc_row else "Service"
+                cur = conn.execute(
+                    "INSERT INTO orders "
+                    "(user_id, service_id, provider_id, status, order_type, scheduled_at, "
+                    "total_price, notes, delivery_type, items_json) "
+                    "VALUES (?, ?, ?, 'confirmed', 'appointment', ?, ?, ?, 'in-person', ?)",
+                    (
+                        uid, svc_id, prov_id,
+                        start_dt.isoformat(),
+                        price,
+                        label or f"Seeded future appointment for {svc_name}",
+                        json.dumps([{"name": svc_name, "qty": 1, "price": price}]),
+                    ),
+                )
+                order_id = cur.lastrowid
+                conn.execute(
+                    "INSERT INTO calendar_events "
+                    "(user_id, order_id, title, description, start_time, end_time, provider, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed')",
+                    (
+                        uid, order_id,
+                        f"Appointment: {svc_name}",
+                        f"Booking #{order_id} for {svc_name}. Label: {label}",
+                        start_dt.isoformat(),
+                        end_dt.isoformat(),
+                        named_providers[provider_ids.index(prov_id)]["name"] if prov_id in provider_ids else "Provider",
+                    ),
+                )
+                return order_id
+
+            # ── Scenario A: ANA blocks 4:00 PM - end (dur1) on day+3
+            #    STEVEN requesting 4:30 PM on same day → should be blocked
+            day3 = (now + timedelta(days=3)).replace(hour=0, minute=0, second=0, microsecond=0)
+            # ANA: 4:00 PM to 4:00+dur1 min with first provider
+            ana_start = day3.replace(hour=16, minute=0)
+            _insert_future_appt(ana_id, first_svc_id, first_prov_id, ana_start, dur1,
+                                 "Ana-conflict-seed: 4pm slot, blocks 4:30")
+
+            # ── Scenario B: Several slots on day+5 fully booked for first provider
+            day5 = (now + timedelta(days=5)).replace(hour=0, minute=0, second=0, microsecond=0)
+            _insert_future_appt(john_id,   first_svc_id, first_prov_id, day5.replace(hour=9,  minute=0), dur1, "John-9am")
+            _insert_future_appt(hammad_id, first_svc_id, first_prov_id, day5.replace(hour=10, minute=0), dur1, "Hammad-10am")
+            _insert_future_appt(robert_id, first_svc_id, first_prov_id, day5.replace(hour=11, minute=0), dur1, "Robert-11am")
+            _insert_future_appt(ana_id,    first_svc_id, first_prov_id, day5.replace(hour=14, minute=0), dur1, "Ana-2pm")
+
+            # ── Scenario C: Second provider has a morning block on day+2
+            day2 = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+            _insert_future_appt(steven_id, first_svc_id, second_prov_id, day2.replace(hour=10, minute=0), dur1, "Steven-10am-prov2")
+            _insert_future_appt(john_id,   first_svc_id, second_prov_id, day2.replace(hour=14, minute=0), dur1, "John-2pm-prov2")
+
+            # ── Scatter a few more random future bookings (days 1–14)
+            all_named = [ana_id, steven_id, john_id, hammad_id, robert_id]
+            for _ in range(8):
+                future_day = (now + timedelta(days=random.randint(1, 14))).replace(
+                    hour=random.choice([9, 10, 11, 13, 14, 15, 16]),
+                    minute=0, second=0, microsecond=0)
+                uid_ = random.choice(all_named)
+                svc_ = random.choice(service_ids)
+                prov_ = random.choice(provider_ids)
+                dur_ = service_durations.get(svc_, 30)
+                _insert_future_appt(uid_, svc_, prov_, future_day, dur_, "random-future")
+
+        # ── 6. Loyalty points ───────────────────────────────────────
+        for uid in user_ids:
             points = random.randint(0, 1500)
             tier = "gold" if points > 1000 else "silver" if points > 500 else "bronze"
             conn.execute(
                 "INSERT OR IGNORE INTO loyalty_points (business_name, user_id, points, tier) VALUES (?, ?, ?, ?)",
-                (business_name, user_id, points, tier),
+                (business_name, uid, points, tier),
             )
 
         key = f"seeded_{business_name.lower().replace(' ', '_')}"

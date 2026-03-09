@@ -1,0 +1,29 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Generic AI Business Agent//Appointment System//EN
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:booking-96@genericagent
+DTSTAMP:20260309T045355Z
+DTSTART:20260316T050000Z
+DTEND:20260316T060000Z
+SUMMARY:Dental Cleaning — Steven Williams with Dr. Peter Smith
+DESCRIPTION:📋 APPOINTMENT DETAILS\n──────────────────────────────────────\n👤 Patient:   Steven Williams\n🩺 Provider:  Dr. Peter Smith\n💼 Service:   Dental Cleaning\n📅 Date:      Monday, March 16, 2026\n🕐 Time:      10:00 AM – 11:00 AM (60 min)\n🏥 Clinic:    Bright Smile Dental Clinic\n📋 Reference: APPT-00096\n──────────────────────────────────────\n⏰ Reminders set for 24 hours and 1 hour before.
+ORGANIZER;CN=Bright Smile Dental Clinic:mailto:noreply@genericagent.com
+ATTENDEE;CN=Steven Williams;RSVP=TRUE:mailto:customer@example.com
+LOCATION:Bright Smile Dental Clinic
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT24H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Dental Cleaning with Dr. Peter Smith is tomorrow
+END:VALARM
+BEGIN:VALARM
+TRIGGER:-PT1H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Dental Cleaning starts in 1 hour
+END:VALARM
+END:VEVENT
+END:VCALENDAR
