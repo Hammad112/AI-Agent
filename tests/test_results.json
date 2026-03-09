@@ -1,0 +1,101 @@
+[
+  {
+    "suite": "Restaurant",
+    "passed": 14,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Info Q&A",
+    "passed": 20,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Mixed Intent",
+    "passed": 6,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "DB Integrity",
+    "passed": 21,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Loyalty/Dispute/Family",
+    "passed": 6,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Appointment",
+    "passed": 10,
+    "failed": 2,
+    "warnings": 0,
+    "errors": [
+      "DB: Order #88 status=confirmed, expected 'cancelled'",
+      "DB: Slot 2026-03-17T09:00:00 still shows 1 conflicting booking(s)"
+    ]
+  },
+  {
+    "suite": "Info Q&A",
+    "passed": 20,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Mixed Intent",
+    "passed": 6,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Scheduling Conflicts",
+    "passed": 7,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "DB Integrity",
+    "passed": 21,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Appointment",
+    "passed": 10,
+    "failed": 2,
+    "warnings": 0,
+    "errors": [
+      "DB: Order #98 status=confirmed, expected 'cancelled'",
+      "DB: Slot 2026-03-17T12:30:00 still shows 1 conflicting booking(s)"
+    ]
+  },
+  {
+    "suite": "Info Q&A",
+    "passed": 20,
+    "failed": 0,
+    "warnings": 0,
+    "errors": []
+  },
+  {
+    "suite": "Scheduling Conflicts",
+    "passed": 6,
+    "failed": 1,
+    "warnings": 0,
+    "errors": [
+      "Overlap blocked: conflict message: expected one of ['conflict', 'not available', 'already', 'booked', 'taken', 'sorry', 'cannot', 'overlap', 'another', 'alternative', 'different', 'suggest', 'instead'] in response"
+    ]
+  }
+]

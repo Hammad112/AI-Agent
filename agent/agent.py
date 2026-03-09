@@ -685,3 +685,8 @@ def run_agent_turn(
         "detected_intents": final_state.get("detected_intents", []),
         **meta
     }
+
+def get_location():
+    business_meta = get_business_meta()
+    location = business_meta.get('location', 'Location not available')
+    return f"Our business is located at {location}."

@@ -664,6 +664,20 @@ Respond with only the JSON, no markdown.
         conn.close()
 
 
+def cancel_appointment(appointment_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Update appointment status to 'cancelled'
+    cursor.execute("UPDATE appointments SET status = 'cancelled' WHERE id = ?", (appointment_id,))
+
+    # Free the time slot
+    cursor.execute("DELETE FROM calendar_events WHERE appointment_id = ?", (appointment_id,))
+
+    conn.commit()
+    conn.close()
+
+
 def get_global_stats() -> dict:
     conn = _get_db()
     try:

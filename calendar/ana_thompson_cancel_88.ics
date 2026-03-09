@@ -1,0 +1,19 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Generic AI Business Agent//Appointment System//EN
+CALSCALE:GREGORIAN
+METHOD:CANCEL
+BEGIN:VEVENT
+UID:booking-88@genericagent
+DTSTAMP:20260309T051557Z
+DTSTART:20260321T090000Z
+DTEND:20260321T103000Z
+SUMMARY:CANCELLED: Root Canal — Ana Thompson with Dr. Peter Smith
+DESCRIPTION:⚠ APPOINTMENT CANCELLED\n──────────────────────────────────────\nService:  Root Canal\nPatient:  Ana Thompson\nProvider: Dr. Peter Smith\nWas:      Saturday, March 21, 2026  2:00 PM – 3:30 PM\nRef:      APPT-00088\n──────────────────────────────────────\nThis appointment has been cancelled.\nPlease contact Bright Smile Dental Clinic to rebook.
+ORGANIZER;CN=Bright Smile Dental Clinic:mailto:noreply@genericagent.com
+ATTENDEE;CN=Ana Thompson;RSVP=TRUE:mailto:customer@example.com
+LOCATION:Bright Smile Dental Clinic
+STATUS:CANCELLED
+SEQUENCE:1
+END:VEVENT
+END:VCALENDAR

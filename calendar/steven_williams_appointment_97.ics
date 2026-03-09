@@ -1,0 +1,29 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Generic AI Business Agent//Appointment System//EN
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:booking-97@genericagent
+DTSTAMP:20260309T051950Z
+DTSTART:20260316T124500Z
+DTEND:20260316T133000Z
+SUMMARY:Orthodontic Consult — Steven Williams with Dr. Peter Smith
+DESCRIPTION:📋 APPOINTMENT DETAILS\n──────────────────────────────────────\n👤 Patient:   Steven Williams\n🩺 Provider:  Dr. Peter Smith\n💼 Service:   Orthodontic Consult\n📅 Date:      Monday, March 16, 2026\n🕐 Time:      5:45 PM – 6:30 PM (45 min)\n🏥 Clinic:    Bright Smile Dental Clinic\n📋 Reference: APPT-00097\n──────────────────────────────────────\n⏰ Reminders set for 24 hours and 1 hour before.
+ORGANIZER;CN=Bright Smile Dental Clinic:mailto:noreply@genericagent.com
+ATTENDEE;CN=Steven Williams;RSVP=TRUE:mailto:customer@example.com
+LOCATION:Bright Smile Dental Clinic
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT24H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Orthodontic Consult with Dr. Peter Smith is tomorrow
+END:VALARM
+BEGIN:VALARM
+TRIGGER:-PT1H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Orthodontic Consult starts in 1 hour
+END:VALARM
+END:VEVENT
+END:VCALENDAR

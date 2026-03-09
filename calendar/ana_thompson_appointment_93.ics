@@ -1,0 +1,29 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Generic AI Business Agent//Appointment System//EN
+CALSCALE:GREGORIAN
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:booking-93@genericagent
+DTSTAMP:20260309T052144Z
+DTSTART:20260317T050000Z
+DTEND:20260317T053000Z
+SUMMARY:Service 3 — Ana Thompson with Peter Turner
+DESCRIPTION:📋 APPOINTMENT DETAILS\n──────────────────────────────────────\n👤 Patient:   Ana Thompson\n🩺 Provider:  Peter Turner\n💼 Service:   Service 3\n📅 Date:      Tuesday, March 17, 2026\n🕐 Time:      10:00 AM – 10:30 AM (30 min)\n🏥 Clinic:    Moments Captured Photography\n📋 Reference: APPT-00093\n──────────────────────────────────────\n⏰ Reminders set for 24 hours and 1 hour before.
+ORGANIZER;CN=Moments Captured Photography:mailto:noreply@genericagent.com
+ATTENDEE;CN=Ana Thompson;RSVP=TRUE:mailto:customer@example.com
+LOCATION:Moments Captured Photography
+STATUS:CONFIRMED
+SEQUENCE:0
+BEGIN:VALARM
+TRIGGER:-PT24H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Service 3 with Peter Turner is tomorrow
+END:VALARM
+BEGIN:VALARM
+TRIGGER:-PT1H
+ACTION:DISPLAY
+DESCRIPTION:Reminder: Service 3 starts in 1 hour
+END:VALARM
+END:VEVENT
+END:VCALENDAR
