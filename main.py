@@ -32,7 +32,7 @@ from core.database import (
     get_business_meta,
 )
 from processing.pdf_processor import process_pdf, load_chunks, save_chunks_to_db
-from processing.knowledge_enricher import detect_business_type, enrich_knowledge
+from processing.knowledge_enricher import detect_business_type, enrich_knowledge, enrich_per_item
 from auth.auth import authenticate
 from agent.agent import run_agent_turn
 
@@ -94,6 +94,11 @@ def startup(file_path: str) -> tuple[str, str, list[dict]]:
         with console.status("[bold]Generating synthetic data..."):
             generate_synthetic_data(business_type, business_name, all_chunks)
         console.print("  → Synthetic data [green]generated[/]")
+
+        # 6. Item-level enrichment (requires services to exist)
+        with console.status("[bold]Enriching per-item knowledge..."):
+            enrich_per_item(business_name, business_type)
+        console.print("  → Per-item knowledge [green]complete[/]")
 
         # Store business hours if provided
         hours_meta = get_business_meta("business_hours")

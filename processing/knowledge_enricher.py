@@ -196,3 +196,83 @@ def load_enriched_from_db(business_name: str) -> list[dict]:
         return [dict(r) for r in rows]
     finally:
         conn.close()
+
+
+def enrich_per_item(business_name: str, business_type: str) -> list[dict]:
+    """
+    Generate detailed knowledge for each individual service/product.
+    Covers specs, pros/cons, who it's best for, comparisons — 
+    fulfilling the spec requirement for deep item-level research.
+    """
+    conn = _get_db()
+    try:
+        services = conn.execute(
+            "SELECT id, name, description, price, category FROM services WHERE business_name = ? ORDER BY id",
+            (business_name,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    if not services:
+        return []
+
+    # Check if item-level enrichment already exists
+    conn = _get_db()
+    try:
+        existing = conn.execute(
+            "SELECT COUNT(*) FROM enriched_knowledge WHERE business_name = ? AND topic LIKE '[Item Detail]%'",
+            (business_name,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    if existing >= len(services):
+        return []  # Already enriched
+
+    enriched_items = []
+
+    def _research_item(svc: dict) -> dict | None:
+        prompt = f"""You are a product/service researcher for "{business_name}" ({business_type}).
+
+Research and write detailed information about this specific item:
+  Name: {svc['name']}
+  Category: {svc['category'] or 'General'}
+  Description: {svc['description'] or 'No description'}
+  Price: ${svc['price']:.2f}
+
+Include:
+- Detailed description and what it involves
+- Key features, ingredients, or specifications
+- Pros and cons
+- Who it's best suited for (ideal customer profile)
+- How it compares to similar offerings in the {business_type} industry
+- Common questions customers ask about this item
+- Complementary items/services that pair well with it
+
+Write 150-250 words. Be specific and factual.
+"""
+        try:
+            content = llm_call(prompt, temperature=0.5, max_tokens=500)
+            return {
+                "topic": f"[Item Detail] {svc['name']}",
+                "content": content,
+                "source": "llm_item_enrichment",
+                "topic_tags": f"item,{svc['category'] or 'general'},{svc['name'].lower().replace(' ', ',')}",
+            }
+        except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_research_item, dict(s)): dict(s) for s in services}
+        for future in futures:
+            try:
+                result = future.result()
+                if result:
+                    enriched_items.append(result)
+            except Exception:
+                pass
+
+    if enriched_items:
+        _save_enriched(enriched_items, business_name)
+
+    return enriched_items

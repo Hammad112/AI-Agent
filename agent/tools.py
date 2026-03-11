@@ -19,7 +19,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from core.database import get_business_meta, get_global_stats
-from core.logger import log_agent_event
+from core.logger import log_agent_event, log_db_write
 from core.llm_client import llm_call
 
 try:
@@ -61,8 +61,12 @@ def add_to_cart(state: dict, **kwargs) -> dict:
     session_id = state.get("conversation_id", "")
     conn = _db()
     try:
+        # Begin transaction
+        conn.execute("BEGIN IMMEDIATE")
+        
         services = conn.execute("SELECT * FROM services WHERE business_name = ? ORDER BY id", (state.get("business_name"),)).fetchall()
         if not services:
+            conn.rollback()
             return {"success": False, "message": "No services or items available."}
 
         # Use LLM to match the query to a service
@@ -88,6 +92,7 @@ No markdown, just JSON."""
             items_to_add = []
 
         if not items_to_add:
+            conn.rollback()
             return {"success": False, "message": "I couldn't identify any items to add. Could you be more specific?"}
 
         added_log = []
@@ -103,16 +108,18 @@ No markdown, just JSON."""
             if not svc:
                 continue
 
-            conn.execute(
+            cur_cart = conn.execute(
                 "INSERT INTO cart (user_id, session_id, business_name, service_id, service_name, quantity, unit_price, modifiers, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (user_id, session_id, state.get("business_name"), svc_id, svc["name"], quantity, svc["price"], modifiers, ""),
             )
+            log_db_write(state.get("conversation_id", ""), "cart", "INSERT", cur_cart.lastrowid, {"service": svc["name"], "qty": quantity})
             added_log.append(f"{quantity}x {svc['name']}")
 
-        conn.commit()
-
         if not added_log:
-             return {"success": False, "message": "I couldn't find those specific items in our menu."}
+            conn.rollback()
+            return {"success": False, "message": "I couldn't find those specific items in our menu."}
+
+        conn.commit()
 
         # Get current cart summary
         cart_items = conn.execute(
@@ -157,6 +164,7 @@ def remove_from_cart(state: dict, **kwargs) -> dict:
                 "DELETE FROM cart WHERE user_id = ? AND session_id = ?",
                 (user_id, session_id),
             )
+            log_db_write(state.get("conversation_id", ""), "cart", "DELETE_ALL", None, {"user_id": user_id, "session_id": session_id})
             conn.commit()
             return {"success": True, "message": "Cart cleared. What would you like to add?", "cart_items": [], "cart_total": 0}
 
@@ -185,6 +193,7 @@ No markdown, just JSON."""
         cart_id = match.get("cart_id")
         removed = conn.execute("SELECT service_name FROM cart WHERE id = ?", (cart_id,)).fetchone()
         conn.execute("DELETE FROM cart WHERE id = ?", (cart_id,))
+        log_db_write(state.get("conversation_id", ""), "cart", "DELETE", cart_id, {"service": removed["service_name"] if removed else "unknown"})
         conn.commit()
 
         remaining = conn.execute(
@@ -314,12 +323,14 @@ def confirm_order(state: dict, **kwargs) -> dict:
             ),
         )
         order_id = cur.lastrowid
+        log_db_write(state.get("conversation_id", ""), "orders", "INSERT", order_id, {"total": round(total, 2), "status": "confirmed"})
 
         # Clear cart
         conn.execute(
             "DELETE FROM cart WHERE user_id = ? AND session_id = ? AND business_name = ?",
             (user_id, session_id, state.get("business_name")),
         )
+        log_db_write(state.get("conversation_id", ""), "cart", "DELETE_ALL", None, {"reason": "order_confirmed", "order_id": order_id})
 
         # Award loyalty points
         points_earned = int(total * 10)
@@ -333,12 +344,14 @@ def confirm_order(state: dict, **kwargs) -> dict:
                    WHERE user_id = ?""",
                 (new_points, new_tier, datetime.now(timezone.utc).isoformat(), user_id),
             )
+            log_db_write(state.get("conversation_id", ""), "loyalty_points", "UPDATE", None, {"user_id": user_id, "points": new_points, "tier": new_tier})
         else:
             conn.execute(
                 """INSERT INTO loyalty_points (user_id, points, tier, updated_at)
                    VALUES (?, ?, ?, ?)""",
                 (user_id, new_points, new_tier, datetime.now(timezone.utc).isoformat()),
             )
+            log_db_write(state.get("conversation_id", ""), "loyalty_points", "INSERT", None, {"user_id": user_id, "points": new_points, "tier": new_tier})
         conn.commit()
 
         order_ref = _generate_ref("ORDER", order_id)
@@ -582,6 +595,7 @@ No markdown, just JSON."""
                    VALUES (?, ?, ?, 'confirmed', 'appointment', ?, ?, ?)""",
                 (user_id, s_id, prov_id, current_dt.isoformat(), price, f"Booked via AI assistant for {state.get('business_name')}"),
             )
+            log_db_write(state.get("conversation_id", ""), "orders", "INSERT", cur.lastrowid, {"type": "appointment", "service": svc_name, "date": current_dt.isoformat()})
             order_id = cur.lastrowid
             ref = _generate_ref("APPT", order_id)
             last_ref = ref
@@ -592,6 +606,7 @@ No markdown, just JSON."""
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (user_id, order_id, f"Appointment: {svc_name}", f"Booking #{order_id} for {svc_name}. Ref: {ref}", current_dt.isoformat(), end_dt.isoformat(), assigned_provider["name"], 'confirmed'),
             )
+            log_db_write(state.get("conversation_id", ""), "calendar_events", "INSERT", None, {"order_id": order_id, "service": svc_name, "start": current_dt.isoformat()})
             
             _generate_ics(
                 order_id, svc_name, current_dt, end_dt,
@@ -667,6 +682,7 @@ Interpret relative dates. No markdown, just JSON."""
             "UPDATE orders SET scheduled_at = ?, notes = ? WHERE id = ?",
             (new_dt, "Rescheduled via AI assistant", order["id"]),
         )
+        log_db_write(state.get("conversation_id", ""), "orders", "UPDATE", order["id"], {"action": "reschedule", "new_dt": new_dt})
 
         # Get actual service duration from DB
         svc_dur = conn.execute(
@@ -692,6 +708,7 @@ Interpret relative dates. No markdown, just JSON."""
                 "UPDATE calendar_events SET start_time = ?, end_time = ?, status = 'confirmed' WHERE order_id = ?",
                 (start.isoformat(), end.isoformat(), order["id"]),
             )
+            log_db_write(state.get("conversation_id", ""), "calendar_events", "UPDATE", None, {"order_id": order["id"], "action": "reschedule", "new_start": start.isoformat()})
         except ValueError:
             pass
 
@@ -752,10 +769,12 @@ def cancel_booking(state: dict, **kwargs) -> dict:
         if not order:
             return {"success": False, "message": "No active bookings found to cancel."}
         conn.execute("UPDATE orders SET status = 'cancelled' WHERE id = ?", (order["id"],))
+        log_db_write(state.get("conversation_id", ""), "orders", "UPDATE", order["id"], {"action": "cancel", "status": "cancelled"})
         conn.execute(
             "UPDATE calendar_events SET status = 'cancelled' WHERE order_id = ?",
             (order["id"],),
         )
+        log_db_write(state.get("conversation_id", ""), "calendar_events", "UPDATE", None, {"order_id": order["id"], "action": "cancel"})
         conn.commit()
         booking_ref = _generate_ref("APPT", order["id"])
 
@@ -977,6 +996,7 @@ No markdown, just JSON."""
                 "UPDATE users SET address = ?, postal_code = ?, city = ? WHERE id = ?",
                 (result.get("formatted", ""), result.get("postal_code", ""), result.get("city", ""), user_id),
             )
+            log_db_write(state.get("conversation_id", ""), "users", "UPDATE", user_id, {"action": "address_update", "address": result.get("formatted", "")})
             conn.commit()
         finally:
             conn.close()
@@ -1219,6 +1239,7 @@ def apply_loyalty_discount(state: dict, **kwargs) -> dict:
             "UPDATE loyalty_points SET points = ?, updated_at = ? WHERE user_id = ? AND business_name = ?",
             (new_points, datetime.now(timezone.utc).isoformat(), user_id, state.get("business_name")),
         )
+        log_db_write(state.get("conversation_id", ""), "loyalty_points", "UPDATE", None, {"action": "redeem", "points_used": points_used, "remaining": new_points})
         conn.commit()
         return {
             "success": True, "discount_applied": discount, "points_used": points_used,
@@ -1308,6 +1329,7 @@ No markdown, just JSON."""
             )
         )
         complaint_id = cur.lastrowid
+        log_db_write(state.get("conversation_id", ""), "complaints", "INSERT", complaint_id, {"type": dispute.get("complaint_type"), "order_id": dispute.get("order_id")})
         conn.commit()
         
         ref_id = _generate_ref("REF", complaint_id)
@@ -1399,6 +1421,7 @@ No markdown, just JSON."""
             db_field = valid_fields.get(field.lower())
             if db_field:
                 conn.execute(f"UPDATE users SET {db_field} = ? WHERE id = ?", (update["new_value"], user_id))
+                log_db_write(state.get("conversation_id", ""), "users", "UPDATE", user_id, {"field": db_field, "new_value": update["new_value"]})
                 conn.commit()
                 return {
                     "success": True,

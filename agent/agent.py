@@ -288,6 +288,46 @@ Rules:
         raw_activated += [t for t in forced_tools if _mode_allowed(t)]
         activated = list(dict.fromkeys(raw_activated))
 
+        # ── Per-tool LLM confirmation ─────────────────────────────────────
+        # For each candidate tool, ask the LLM individually: "is this tool needed?"
+        # Forced tools skip this check (already validated by keyword heuristics)
+        if activated:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _confirm_tool(tool_name: str) -> bool:
+                """Ask LLM if a specific tool is needed for this query."""
+                if tool_name in forced_tools:
+                    return True  # Pre-validated by heuristics
+                desc = TOOLS[tool_name][1]
+                confirm_prompt = f"""Customer query: "{query}"
+Tool: "{tool_name}" — {desc}
+
+Is this tool needed to handle the customer's current request? Answer YES or NO only."""
+                try:
+                    answer = llm_call(confirm_prompt, temperature=0.0, max_tokens=10,
+                                      conversation_id=state["conversation_id"])
+                    return "yes" in answer.strip().lower()
+                except Exception:
+                    return True  # If confirmation fails, keep the tool
+
+            with ThreadPoolExecutor(max_workers=min(len(activated), 5)) as executor:
+                futures = {executor.submit(_confirm_tool, t): t for t in activated}
+                confirmed = []
+                for future in futures:
+                    tool_name = futures[future]
+                    try:
+                        if future.result():
+                            confirmed.append(tool_name)
+                    except Exception:
+                        confirmed.append(tool_name)  # Keep on error
+
+            log_agent_event(state["conversation_id"], "per_tool_confirmation", {
+                "candidates": activated,
+                "confirmed": confirmed,
+                "dropped": [t for t in activated if t not in confirmed],
+            })
+            activated = confirmed
+
         # GUARDRAIL: block premature confirm / book unless user explicitly said yes
         # (forced_tools already passed this check above, so only block LLM additions)
         for guarded in ("confirm_order", "book_appointment"):
@@ -577,6 +617,69 @@ Write a helpful, conversational response:"""
             log_agent_event(state["conversation_id"], "critic_revision", {"issues": issues})
             return {**state, "response": fixed, "critic_passed": True, "critic_feedback": "Revised: was empty"}
         except Exception:
+            pass
+
+    # ── LLM-based validation against PDF rules ──────────────────────────────
+    # Only invoke when rule-based checks passed AND we have retrieved chunks
+    retrieved = state.get("retrieved_chunks", [])
+    if passed and retrieved and response and len(response.strip()) > 30:
+        # Pick up to 3 most relevant chunk excerpts (limit token cost)
+        chunk_excerpts = "\n---\n".join(
+            c.get("text", "")[:400] for c in retrieved[:3]
+        )
+        try:
+            pdf_check_prompt = f"""You are a strict quality auditor for a customer service AI.
+
+Business rules from the company PDF:
+---
+{chunk_excerpts}
+---
+
+Agent response to evaluate:
+"{response}"
+
+Customer query: "{query}"
+
+Does the agent's response CONTRADICT or VIOLATE any rules, policies, prices, or facts from the business PDF above?
+Only flag clear, specific contradictions (e.g. wrong price, wrong hours, services not offered).
+Do NOT flag minor phrasing differences or creative wording.
+
+Return ONLY JSON:
+{{"violation_found": true/false, "violation_detail": "specific contradiction" or ""}}
+No markdown, just JSON."""
+
+            raw = llm_call(pdf_check_prompt, temperature=0.1, max_tokens=200)
+            raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
+            check = json.loads(raw)
+
+            pdf_result = {
+                "method": "llm_pdf_validation",
+                "violation_found": check.get("violation_found", False),
+                "detail": check.get("violation_detail", ""),
+            }
+            log_agent_event(state["conversation_id"], "critic_pdf_validation", pdf_result)
+
+            if check.get("violation_found"):
+                violation = check.get("violation_detail", "Unknown violation")
+                # Regenerate with correction instruction
+                fix_prompt = f"""The agent gave a response that contradicts the business documentation.
+
+Violation: {violation}
+
+Business rules excerpt:
+{chunk_excerpts[:800]}
+
+Customer query: "{query}"
+Original response: "{response}"
+Tool results: {json.dumps({k: v.get('message', '') for k, v in tool_results.items()}, default=str)}
+
+Write a CORRECTED response that does NOT violate the business rules:"""
+                fixed = llm_call(fix_prompt, temperature=0.3, max_tokens=500)
+                log_message(state["conversation_id"], "assistant_revised", fixed)
+                log_agent_event(state["conversation_id"], "critic_revision", {"issues": [f"PDF violation: {violation}"]})
+                return {**state, "response": fixed, "critic_passed": True, "critic_feedback": f"Revised: PDF violation fixed — {violation}"}
+        except (json.JSONDecodeError, Exception):
+            # If LLM validation fails, let the response pass (rule-based already passed)
             pass
 
     return {

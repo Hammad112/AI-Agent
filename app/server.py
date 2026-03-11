@@ -27,7 +27,7 @@ load_dotenv()
 
 from core.database import init_db, generate_synthetic_data, set_business_meta, get_business_meta
 from processing.pdf_processor import process_pdf, load_chunks, save_chunks_to_db
-from processing.knowledge_enricher import detect_business_type, enrich_knowledge
+from processing.knowledge_enricher import detect_business_type, enrich_knowledge, enrich_per_item
 from agent.agent import run_agent_turn
 
 app = FastAPI(
@@ -174,6 +174,9 @@ async def load_pdf(request: LoadPDFRequest):
 
         # Generate synthetic data
         generate_synthetic_data(_business_type, _business_name)
+
+        # Item-level enrichment (requires services to exist)
+        enrich_per_item(_business_name, _business_type)
 
         return LoadPDFResponse(
             success=True,

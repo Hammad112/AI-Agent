@@ -30,7 +30,66 @@ def process_pdf(file_path: str) -> list[dict]:
         chunks = _intelligent_chunk(page_text, page_num)
         all_chunks.extend(chunks)
 
+    # Post-process: use LLM to classify chunks into logical business topics
+    all_chunks = _llm_reclassify_chunks(all_chunks)
+
     return all_chunks
+
+
+def _llm_reclassify_chunks(chunks: list[dict]) -> list[dict]:
+    """
+    Use a single LLM call to classify structurally-parsed chunks into
+    logical business topics/skills.  This fulfills the spec requirement
+    for a 'separate LLM call to chunk/divide pdf information to logical topics'.
+    """
+    if not chunks:
+        return chunks
+
+    try:
+        from core.llm_client import llm_call
+        import json as _json
+    except ImportError:
+        return chunks  # graceful fallback if llm_client not available
+
+    # Build summaries of each chunk (truncated to save tokens)
+    summaries = []
+    for i, c in enumerate(chunks):
+        text_preview = c.get("text", "")[:150].replace("\n", " ")
+        summaries.append(f"  {i}: [{c.get('section_title', 'General')}] {text_preview}")
+
+    # Process in batches of 20 chunks to stay within token limits
+    batch_size = 20
+    for batch_start in range(0, len(chunks), batch_size):
+        batch_end = min(batch_start + batch_size, len(chunks))
+        batch_summaries = "\n".join(summaries[batch_start:batch_end])
+        indices = list(range(batch_start, batch_end))
+
+        prompt = f"""You are a business knowledge organizer. Here are {len(indices)} chunks from a business description document:
+
+{batch_summaries}
+
+Classify each chunk into one logical business topic/skill category.
+Use clear, descriptive category names like: "Menu & Pricing", "Services Offered",
+"Operating Hours", "Cancellation Policy", "Staff & Qualifications",
+"Location & Contact", "Promotions & Deals", "Quality Standards", etc.
+
+Return ONLY a JSON object mapping chunk index to topic:
+{{{", ".join(f'"{i}": "topic"' for i in indices[:3])}, ...}}
+No markdown, just JSON."""
+
+        try:
+            raw = llm_call(prompt, temperature=0.1, max_tokens=500)
+            raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
+            mapping = _json.loads(raw)
+
+            for idx_str, topic in mapping.items():
+                idx = int(idx_str)
+                if 0 <= idx < len(chunks) and isinstance(topic, str):
+                    chunks[idx]["section_title"] = topic
+        except Exception:
+            pass  # Keep structural section_title if LLM fails
+
+    return chunks
 
 
 def _extract_pages_pdf(pdf_path: str) -> list[str]:

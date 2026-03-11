@@ -132,3 +132,33 @@ def log_llm_call(
         conn.commit()
     finally:
         conn.close()
+
+
+def log_db_write(
+    conversation_id: str,
+    table_name: str,
+    operation: str,
+    row_id: int | None = None,
+    key_values: dict | None = None,
+) -> None:
+    """Log an individual SQL write operation (INSERT/UPDATE/DELETE) for audit tracing."""
+    conn = _get_db()
+    try:
+        details = {
+            "table": table_name,
+            "operation": operation,
+            "row_id": row_id,
+            "key_values": key_values or {},
+        }
+        conn.execute(
+            "INSERT INTO agent_logs (conversation_id, event_type, details, timestamp) VALUES (?, ?, ?, ?)",
+            (
+                conversation_id,
+                "db_write",
+                json.dumps(details, ensure_ascii=False, default=str),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()

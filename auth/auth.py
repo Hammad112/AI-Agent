@@ -86,13 +86,22 @@ def _register() -> dict | None:
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE id = ?", (cur.lastrowid,)).fetchone()
+        # Get current business name from database
+        business_name = None
+        try:
+            business_name = conn.execute("SELECT value FROM business_meta WHERE key = 'business_name'").fetchone()
+            if business_name:
+                business_name = business_name["value"]
+        except:
+            business_name = None
+        
         conn.execute(
-            "INSERT OR IGNORE INTO loyalty_points (user_id, points, tier) VALUES (?, ?, ?)",
-            (cur.lastrowid, 100, "bronze"),
+            "INSERT OR IGNORE INTO loyalty_points (business_name, user_id, points, tier) VALUES (?, ?, ?, ?)",
+            (business_name, cur.lastrowid, 100, "bronze"),
         )
         conn.commit()
-        console.print(f"\n[bold green]✓ Account created! Welcome, {full_name}! 🎉[/]")
-        console.print("[dim]You've been awarded 100 welcome loyalty points.[/]\n")
+        # console.print(f"\n[bold green]✓ Account created! Welcome, {full_name}! 🎉[/]")
+        # console.print("[dim]You've been awarded 100 welcome loyalty points.[/]\n")
         return dict(row)
     except sqlite3.IntegrityError as e:
         if "username" in str(e):
